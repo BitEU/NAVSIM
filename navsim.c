@@ -285,6 +285,14 @@ static Projectile projectiles[MAX_PROJECTILES];
 static int  num_projectiles = 0;
 static EngagementRecord records[8192];
 static int  num_records = 0;
+/* Simple aggregated statistics tracked during the run */
+static int stat_launches[2] = {0, 0};         /* launches by side (SIDE_NATO=0,SIDE_PACT=1) */
+static int stat_hits[2] = {0, 0};             /* confirmed impacts by attacker side */
+static int stat_misses[2] = {0, 0};           /* projectiles expended without impact */
+static int stat_detect_opps[2] = {0, 0};      /* detection opportunities considered per detector side */
+static int stat_detect_success[2] = {0, 0};   /* successful detections per detector side */
+static int stat_detect_jammed[2] = {0, 0};    /* detection attempts while jammed per detector side */
+static int stat_kills_by_side[2] = {0, 0};    /* kills awarded per side */
 
 /* Environmental constants */
 #define AIR_DENSITY_SL  1.225    /* kg/m³ at sea level */
@@ -785,27 +793,33 @@ static void phase_detect(int tick) {
             }
             
             if (d < eff_range) {
+                /* Count this as a detection opportunity for the detector side */
+                stat_detect_opps[ships[i].side]++;
+                if (radar->jam_strength > 0.3) stat_detect_jammed[ships[i].side]++;
+
                 double p_detect = 1.0 - pow(d / eff_range, 2.5);
-                
+
                 /* Frequency-dependent detection */
                 if (radar->band == RADAR_L_BAND) {
                     p_detect *= 0.85; /* Lower resolution but longer range */
                 } else if (radar->band == RADAR_X_BAND) {
                     p_detect *= 1.15; /* Better resolution */
                 }
-                
+
                 /* Submarines are much harder to detect */
                 if (ships[j].ship_class == CLASS_SUBMARINE)
                     p_detect *= 0.15;
-                    
+
                 /* Weather effects */
                 p_detect *= rng_gauss(1.0, 0.12);
-                
+
                 /* Clamp probability */
                 if (p_detect < 0.01) p_detect = 0.01;
                 if (p_detect > 0.98) p_detect = 0.98;
-                
+
                 if (rng_uniform() < p_detect) {
+                    /* Successful detection */
+                    stat_detect_success[ships[i].side]++;
                     ships[j].detected = 1;
                     if (tick % 30 == 0 || tick < 60) {
                         const char *jam_note = (radar->jam_strength > 0.3) ? " [JAMMED]" : "";
@@ -931,10 +945,14 @@ static void phase_weapons(int tick) {
             wpn->cooldown = wpn->reload_ticks;
 
             /* Launch projectiles */
+            int launched = 0;
             for (int r = 0; r < rounds && num_projectiles < MAX_PROJECTILES; r++) {
                 init_projectile(&projectiles[num_projectiles], atk, def, wpn, tick);
                 num_projectiles++;
+                launched++;
             }
+            /* Track actual launches by side */
+            stat_launches[atk->side] += launched;
 
             printf("  " ANSI_YELLOW "[LAUNCH]" ANSI_RESET " %s %s -> %s %s | "
                    "%s x%d @ %.1f NM\n",
@@ -947,16 +965,38 @@ static void phase_weapons(int tick) {
     /* Update projectiles and check for impacts */
     for (int p = 0; p < num_projectiles; p++) {
         if (!projectiles[p].active) continue;
-        
+
         update_projectile_physics(&projectiles[p], 1.0);
-        
-        if (!projectiles[p].active) continue;
-        
+
+        /* If projectile deactivated by physics (water / out-of-bounds), count as a miss */
+        if (!projectiles[p].active) {
+            Side attacker_side = SIDE_NATO;
+            for (int si = 0; si < num_ships; si++) {
+                if (strcmp(ships[si].name, projectiles[p].attacker) == 0) {
+                    attacker_side = ships[si].side;
+                    break;
+                }
+            }
+            stat_misses[attacker_side]++;
+            if (num_records < 8192) {
+                EngagementRecord *rec = &records[num_records++];
+                rec->tick = tick;
+                strncpy(rec->attacker, projectiles[p].attacker, MAX_NAME - 1);
+                strncpy(rec->defender, projectiles[p].target, MAX_NAME - 1);
+                strncpy(rec->weapon, projectiles[p].weapon_name, MAX_NAME - 1);
+                rec->hit = 0;
+                rec->damage = 0.0;
+                rec->defender_hp_after = -1.0;
+                rec->kill = 0;
+            }
+            continue;
+        }
+
         /* Check for impacts with ships */
         for (int i = 0; i < num_ships; i++) {
             if (!ships[i].alive) continue;
             if (strcmp(ships[i].name, projectiles[p].attacker) == 0) continue;
-            
+
             /* Find attacker's side and skip friendly ships */
             Side attacker_side = SIDE_NATO;
             for (int si = 0; si < num_ships; si++) {
@@ -966,23 +1006,23 @@ static void phase_weapons(int tick) {
                 }
             }
             if (ships[i].side == attacker_side) continue;
-            
+
             double dx = projectiles[p].x - ships[i].x;
             double dy = projectiles[p].y - ships[i].y;
             double dist = sqrt(dx * dx + dy * dy);
-            
+
             /* Hit radius: 0.05 NM = ~100 yards */
             double hit_radius = 0.05;
             if (ships[i].ship_class == CLASS_CARRIER) hit_radius = 0.15;
             else if (ships[i].ship_class == CLASS_CRUISER) hit_radius = 0.10;
-            
+
             if (dist < hit_radius) {
                 /* Impact! */
                 double dmg = projectiles[p].damage;
-                
+
                 /* Apply armor */
                 dmg *= (1.0 - ships[i].armor);
-                
+
                 /* Guided weapons are more accurate */
                 Weapon *orig_wpn = NULL;
                 for (int si = 0; si < num_ships; si++) {
@@ -994,14 +1034,14 @@ static void phase_weapons(int tick) {
                         }
                     }
                 }
-                
+
                 /* Guidance quality affects damage */
                 if (orig_wpn && orig_wpn->guidance_quality > 0.7) {
                     dmg *= rng_gauss(1.0, 0.10);
                 } else {
                     dmg *= rng_gauss(1.0, 0.25);
                 }
-                
+
                 /* Damage compartments */
                 int comp_hit = (int)(rng_uniform() * MAX_COMPARTMENTS);
                 if (comp_hit < MAX_COMPARTMENTS) {
@@ -1014,18 +1054,19 @@ static void phase_weapons(int tick) {
                         ships[i].compartments[comp_hit].on_fire = 1;
                     }
                 }
-                
+
                 if (dmg < 1) dmg = 1;
                 ships[i].hp -= dmg;
-                
-                /* Find attacker for stats */
+
+                /* Find attacker for stats and add hit/damage */
                 for (int si = 0; si < num_ships; si++) {
                     if (strcmp(ships[si].name, projectiles[p].attacker) == 0) {
                         ships[si].damage_dealt_total += (int)dmg;
                         break;
                     }
                 }
-                
+                stat_hits[attacker_side]++;
+
                 int killed = 0;
                 if (ships[i].hp <= 0) {
                     ships[i].hp = 0;
@@ -1038,15 +1079,16 @@ static void phase_weapons(int tick) {
                             break;
                         }
                     }
+                    stat_kills_by_side[attacker_side]++;
                 }
-                
+
                 printf("  " ANSI_RED "[IMPACT]" ANSI_RESET " %s -> %s | "
                        "%.0f dmg",
                        projectiles[p].weapon_name, ships[i].name, dmg);
                 if (killed)
                     printf(" " ANSI_BOLD ANSI_RED "*** SUNK ***" ANSI_RESET);
                 printf(" [HP: %.0f/%.0f]\n", ships[i].hp, ships[i].max_hp);
-                
+
                 /* Record engagement */
                 if (num_records < 8192) {
                     EngagementRecord *rec = &records[num_records++];
@@ -1059,7 +1101,7 @@ static void phase_weapons(int tick) {
                     rec->defender_hp_after = ships[i].hp;
                     rec->kill = killed;
                 }
-                
+
                 projectiles[p].active = 0;
                 break;
             }
@@ -1268,6 +1310,72 @@ static void assess_victory(void) {
 
     printf("\n  Combat Effectiveness Score:\n");
     printf("    NATO: %.0f  |  PACT: %.0f\n", nato_score, pact_score);
+
+        /* Aggregate additional statistics for After-Action Report */
+        int launches_nato = stat_launches[SIDE_NATO];
+        int launches_pact = stat_launches[SIDE_PACT];
+        int hits_nato = stat_hits[SIDE_NATO];
+        int hits_pact = stat_hits[SIDE_PACT];
+        int misses_nato = stat_misses[SIDE_NATO];
+        int misses_pact = stat_misses[SIDE_PACT];
+        int in_flight_nato = launches_nato - hits_nato - misses_nato;
+        int in_flight_pact = launches_pact - hits_pact - misses_pact;
+
+        int damage_nato = 0, damage_pact = 0;
+        int kills_nato = 0, kills_pact = 0;
+        for (int i = 0; i < num_ships; i++) {
+         if (ships[i].side == SIDE_NATO) {
+             damage_nato += ships[i].damage_dealt_total;
+             kills_nato += ships[i].kills;
+         } else {
+             damage_pact += ships[i].damage_dealt_total;
+             kills_pact += ships[i].kills;
+         }
+        }
+
+        /* Detection summary */
+        int det_opps_n = stat_detect_opps[SIDE_NATO];
+        int det_opps_p = stat_detect_opps[SIDE_PACT];
+        int det_succ_n = stat_detect_success[SIDE_NATO];
+        int det_succ_p = stat_detect_success[SIDE_PACT];
+        int det_jam_n = stat_detect_jammed[SIDE_NATO];
+        int det_jam_p = stat_detect_jammed[SIDE_PACT];
+
+        int nato_ships_total = 0, pact_ships_total = 0;
+        int nato_ships_detected = 0, pact_ships_detected = 0;
+        for (int i = 0; i < num_ships; i++) {
+         if (ships[i].side == SIDE_NATO) {
+             nato_ships_total++;
+             if (ships[i].detected) nato_ships_detected++;
+         } else {
+             pact_ships_total++;
+             if (ships[i].detected) pact_ships_detected++;
+         }
+        }
+
+        double nato_hit_rate = launches_nato > 0 ? (double)hits_nato / launches_nato * 100.0 : 0.0;
+        double pact_hit_rate = launches_pact > 0 ? (double)hits_pact / launches_pact * 100.0 : 0.0;
+        double nato_avg_dmg = hits_nato > 0 ? (double)damage_nato / hits_nato : 0.0;
+        double pact_avg_dmg = hits_pact > 0 ? (double)damage_pact / hits_pact : 0.0;
+
+        printf("\n  Combat Statistics:\n");
+        printf("    NATO: launches=%d  hits=%d (%.1f%%)  misses=%d  in-flight=%d\n",
+            launches_nato, hits_nato, nato_hit_rate, misses_nato, in_flight_nato);
+        printf("          damage_dealt=%d  avg_dmg/hit=%.1f  kills=%d\n",
+            damage_nato, nato_avg_dmg, kills_nato);
+        printf("          detections: attempts=%d  successes=%d (%.1f%%)  jammed_attempts=%d\n",
+            det_opps_n, det_succ_n, det_opps_n > 0 ? (double)det_succ_n / det_opps_n * 100.0 : 0.0, det_jam_n);
+        printf("          ships detected: %d/%d (%.1f%%)\n",
+            nato_ships_detected, nato_ships_total, nato_ships_total > 0 ? (double)nato_ships_detected / nato_ships_total * 100.0 : 0.0);
+
+        printf("\n    PACT: launches=%d  hits=%d (%.1f%%)  misses=%d  in-flight=%d\n",
+            launches_pact, hits_pact, pact_hit_rate, misses_pact, in_flight_pact);
+        printf("          damage_dealt=%d  avg_dmg/hit=%.1f  kills=%d\n",
+            damage_pact, pact_avg_dmg, kills_pact);
+        printf("          detections: attempts=%d  successes=%d (%.1f%%)  jammed_attempts=%d\n",
+            det_opps_p, det_succ_p, det_opps_p > 0 ? (double)det_succ_p / det_opps_p * 100.0 : 0.0, det_jam_p);
+        printf("          ships detected: %d/%d (%.1f%%)\n",
+            pact_ships_detected, pact_ships_total, pact_ships_total > 0 ? (double)pact_ships_detected / pact_ships_total * 100.0 : 0.0);
 
     if (nato_alive == 0 && pact_alive == 0)
         printf("\n  " ANSI_BOLD "RESULT: MUTUAL DESTRUCTION\n" ANSI_RESET);
