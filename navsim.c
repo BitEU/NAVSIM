@@ -349,12 +349,25 @@ static void update_projectile_physics(Projectile *p, double dt) {
     double v_total_ms = sqrt(
         (p->vx * 1852.0) * (p->vx * 1852.0) +
         (p->vy * 1852.0) * (p->vy * 1852.0) +
-        (p->vz * 0.3048) * (p->vz * 0.3048)
+        (p->vz * 0.3048) * (p->vz *0.3048)
     );
     
-    /* Reference area estimate: 0.2 m² for missiles, 0.01 m² for shells */
-    double ref_area = (p->type == WPN_SSM || p->type == WPN_CRUISE_MISSILE) ? 0.2 : 0.01;
-    double drag_force = 0.5 * AIR_DENSITY_SL * p->drag_coeff * ref_area * v_total_ms * v_total_ms;
+    /* Cruise missiles maintain speed with thrust - minimal net drag
+       SSMs briefly accelerate then coast - moderate drag
+       Shells are ballistic - full drag */
+    double ref_area, drag_multiplier;
+    if (p->type == WPN_CRUISE_MISSILE) {
+        ref_area = 0.2;
+        drag_multiplier = 0.02;  /* Engines mostly counteract drag */
+    } else if (p->type == WPN_SSM) {
+        ref_area = 0.2;
+        drag_multiplier = 0.1;   /* Some thrust, but coasting */
+    } else {
+        ref_area = 0.01;
+        drag_multiplier = 1.0;   /* Full ballistic drag */
+    }
+    
+    double drag_force = 0.5 * AIR_DENSITY_SL * p->drag_coeff * ref_area * v_total_ms * v_total_ms * drag_multiplier;
     double drag_accel = drag_force / p->mass_kg;
     
     if (v_total_ms > 0.1) {
@@ -371,12 +384,14 @@ static void update_projectile_physics(Projectile *p, double dt) {
     /* Check impact */
     if (p->z <= 0) {
         p->active = 0; /* Hit water */
+        /* Debug: printf("  [DEBUG] Projectile %s hit water at (%.1f, %.1f)\n", p->weapon_name, p->x, p->y); */
     }
     
     /* Out of bounds check */
     if (p->x < -50 || p->x > GRID_SIZE + 50 ||
         p->y < -50 || p->y > GRID_SIZE + 50) {
         p->active = 0;
+        /* Debug: printf("  [DEBUG] Projectile %s out of bounds at (%.1f, %.1f)\n", p->weapon_name, p->x, p->y); */
     }
 }
 
@@ -478,7 +493,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 350, 42, 3.3, 170);
     init_radar(&s->fire_control_radar, RADAR_X_BAND, 180, 38, 9.0, 110);
     s->ecm_power_kw = 80;
-    add_weapon(s, WPN_CRUISE_MISSILE, "Tomahawk BGM-109", 280, 0.78, 180, 1, 90, 4, 0.72, 1400, 0, 0.92);
+    add_weapon(s, WPN_CRUISE_MISSILE, "Tomahawk BGM-109", 280, 0.78, 180, 1, 90, 32, 0.72, 1400, 0, 0.92);
     add_weapon(s, WPN_SSM, "Harpoon RGM-84", 70, 0.75, 95, 2, 45, 16, 0.85, 520, 0, 0.88);
     add_weapon(s, WPN_SAM, "SM-2MR Standard", 95, 0.68, 48, 2, 28, 96, 3.5, 700, 0, 0.82);
     add_weapon(s, WPN_GUN_5IN, "Mk 45 5\"/54", 14, 0.48, 28, 4, 8, 680, 808, 70, 45, 0);
@@ -491,6 +506,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 320, 40, 3.2, 160);
     init_radar(&s->fire_control_radar, RADAR_X_BAND, 160, 36, 9.2, 105);
     s->ecm_power_kw = 60;
+    add_weapon(s, WPN_CRUISE_MISSILE, "Tomahawk BGM-109", 280, 0.76, 180, 1, 95, 28, 0.72, 1400, 0, 0.90);
     add_weapon(s, WPN_SSM, "Harpoon RGM-84", 70, 0.75, 95, 2, 45, 16, 0.85, 520, 0, 0.88);
     add_weapon(s, WPN_SAM, "SM-2 Standard", 90, 0.66, 45, 2, 30, 90, 3.5, 700, 0, 0.80);
     add_weapon(s, WPN_GUN_5IN, "Mk 45 5\"/62", 15, 0.50, 30, 4, 7, 700, 870, 70, 45, 0);
@@ -504,6 +520,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 280, 38, 3.0, 130);
     init_radar(&s->fire_control_radar, RADAR_X_BAND, 140, 34, 9.0, 95);
     s->ecm_power_kw = 40;
+    add_weapon(s, WPN_CRUISE_MISSILE, "Tomahawk BGM-109", 280, 0.74, 180, 1, 100, 12, 0.72, 1400, 0, 0.88);
     add_weapon(s, WPN_SSM, "Harpoon RGM-84", 70, 0.75, 95, 2, 45, 8, 0.85, 520, 0, 0.88);
     add_weapon(s, WPN_TORPEDO, "Mk 46 ASW", 6, 0.62, 130, 1, 65, 12, 45, 235, 0, 0.65);
     add_weapon(s, WPN_GUN_5IN, "Mk 45 5\"/54", 14, 0.48, 28, 4, 8, 600, 808, 70, 45, 0);
@@ -584,7 +601,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 480, 43, 2.9, 175);
     init_radar(&s->fire_control_radar, RADAR_C_BAND, 190, 38, 5.5, 115);
     s->ecm_power_kw = 140;
-    add_weapon(s, WPN_SSM, "P-700 Granit", 340, 0.62, 165, 2, 70, 12, 2.5, 7000, 0, 0.85);
+    add_weapon(s, WPN_SSM, "P-700 Granit", 150, 0.45, 165, 2, 70, 12, 2.5, 7000, 0, 0.68);
     add_weapon(s, WPN_SAM, "Kinzhal SAM", 12, 0.56, 40, 2, 18, 192, 2.8, 330, 0, 0.76);
     add_weapon(s, WPN_CIWS, "AK-630M", 1.5, 0.54, 15, 1, 3, 3000, 900, 30, 80, 0.90);
 
@@ -595,7 +612,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 360, 41, 3.0, 155);
     init_radar(&s->fire_control_radar, RADAR_C_BAND, 170, 36, 5.2, 100);
     s->ecm_power_kw = 75;
-    add_weapon(s, WPN_SSM, "P-500 Bazalt", 310, 0.60, 165, 2, 65, 16, 2.5, 4800, 0, 0.82);
+    add_weapon(s, WPN_SSM, "P-500 Bazalt", 140, 0.48, 165, 2, 65, 16, 2.5, 4800, 0, 0.70);
     add_weapon(s, WPN_SAM, "S-300F Fort", 80, 0.64, 50, 2, 26, 64, 6.0, 1800, 0, 0.84);
     add_weapon(s, WPN_GUN_130MM, "AK-130", 13, 0.44, 32, 5, 7, 560, 850, 33.4, 48, 0);
     add_weapon(s, WPN_CIWS, "AK-630", 1.2, 0.52, 14, 1, 3, 3200, 900, 30, 80, 0.88);
@@ -607,7 +624,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 420, 44, 2.8, 185);
     init_radar(&s->fire_control_radar, RADAR_C_BAND, 200, 39, 5.0, 125);
     s->ecm_power_kw = 110;
-    add_weapon(s, WPN_CRUISE_MISSILE, "P-700 Granit", 340, 0.64, 165, 2, 75, 20, 2.5, 7000, 0, 0.86);
+    add_weapon(s, WPN_CRUISE_MISSILE, "P-700 Granit", 155, 0.50, 165, 2, 75, 20, 2.5, 7000, 0, 0.72);
     add_weapon(s, WPN_SAM, "S-300F Fort", 80, 0.64, 50, 2, 26, 96, 6.0, 1800, 0, 0.84);
     add_weapon(s, WPN_GUN_130MM, "AK-130", 13, 0.44, 32, 5, 7, 640, 850, 33.4, 48, 0);
     add_weapon(s, WPN_CIWS, "Kashtan CIWS", 2.5, 0.60, 20, 1, 4, 2400, 900, 30, 82, 0.92);
@@ -620,7 +637,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 300, 38, 3.1, 115);
     init_radar(&s->fire_control_radar, RADAR_C_BAND, 145, 34, 5.4, 90);
     s->ecm_power_kw = 50;
-    add_weapon(s, WPN_SSM, "P-270 Moskit", 125, 0.72, 145, 2, 52, 8, 3.0, 4500, 0, 0.88);
+    add_weapon(s, WPN_SSM, "P-270 Moskit", 65, 0.58, 145, 2, 52, 8, 3.0, 4500, 0, 0.74);
     add_weapon(s, WPN_SAM, "Shtil", 28, 0.54, 35, 1, 20, 48, 3.5, 715, 0, 0.72);
     add_weapon(s, WPN_GUN_130MM, "AK-130", 13, 0.44, 32, 5, 7, 560, 850, 33.4, 48, 0);
     add_weapon(s, WPN_CIWS, "AK-630", 1.2, 0.52, 14, 1, 3, 3200, 900, 30, 80, 0.88);
@@ -644,7 +661,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 240, 35, 3.1, 92);
     init_radar(&s->fire_control_radar, RADAR_C_BAND, 125, 31, 5.5, 72);
     s->ecm_power_kw = 28;
-    add_weapon(s, WPN_SSM, "P-270 Moskit", 125, 0.72, 145, 1, 60, 4, 3.0, 4500, 0, 0.88);
+    add_weapon(s, WPN_SSM, "P-270 Moskit", 65, 0.58, 145, 1, 60, 4, 3.0, 4500, 0, 0.74);
     add_weapon(s, WPN_SAM, "Osa-M", 12, 0.48, 28, 1, 18, 20, 2.4, 186, 0, 0.65);
     add_weapon(s, WPN_GUN_76MM, "AK-726", 9, 0.40, 22, 4, 7, 400, 900, 27, 50, 0);
     add_weapon(s, WPN_TORPEDO, "SET-53M", 8, 0.58, 125, 1, 75, 8, 40, 305, 0, 0.55);
@@ -667,7 +684,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 140, 30, 3.3, 55);
     init_radar(&s->fire_control_radar, RADAR_C_BAND, 85, 26, 5.7, 42);
     s->ecm_power_kw = 12;
-    add_weapon(s, WPN_SSM, "P-120 Malakhit", 65, 0.68, 110, 2, 48, 6, 0.95, 870, 0, 0.84);
+    add_weapon(s, WPN_SSM, "P-120 Malakhit", 45, 0.52, 110, 2, 48, 6, 0.95, 870, 0, 0.70);
     add_weapon(s, WPN_SAM, "Osa-M", 12, 0.48, 28, 1, 18, 16, 2.4, 186, 0, 0.65);
     add_weapon(s, WPN_GUN_76MM, "AK-176", 8, 0.38, 20, 5, 6, 320, 900, 25, 52, 0);
 
@@ -678,7 +695,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 120, 28, 3.4, 48);
     init_radar(&s->fire_control_radar, RADAR_C_BAND, 75, 24, 5.8, 36);
     s->ecm_power_kw = 10;
-    add_weapon(s, WPN_SSM, "P-270 Moskit", 125, 0.72, 145, 2, 55, 4, 3.0, 4500, 0, 0.88);
+    add_weapon(s, WPN_SSM, "P-270 Moskit", 65, 0.58, 145, 2, 55, 4, 3.0, 4500, 0, 0.74);
     add_weapon(s, WPN_GUN_76MM, "AK-176", 8, 0.38, 20, 5, 6, 280, 900, 25, 52, 0);
     add_weapon(s, WPN_CIWS, "AK-630", 1.2, 0.52, 14, 1, 3, 2000, 900, 30, 80, 0.88);
 
@@ -689,7 +706,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 75, 24, 3.6, 42);
     init_radar(&s->fire_control_radar, RADAR_X_BAND, 48, 20, 10.2, 22);
     s->ecm_power_kw = 6;
-    add_weapon(s, WPN_SSM, "P-70 Ametist", 42, 0.58, 98, 1, 58, 8, 0.95, 560, 0, 0.72);
+    add_weapon(s, WPN_SSM, "P-70 Ametist", 35, 0.48, 98, 1, 58, 8, 0.95, 560, 0, 0.65);
     add_weapon(s, WPN_TORPEDO, "USET-80", 18, 0.68, 195, 1, 85, 18, 50, 830, 0, 0.66);
 
     s = add_ship(SIDE_PACT, "Akula", "Pr.971 Shchuka-B",
@@ -699,7 +716,7 @@ static void build_scenario(void) {
     init_radar(&s->search_radar, RADAR_S_BAND, 80, 25, 3.5, 45);
     init_radar(&s->fire_control_radar, RADAR_X_BAND, 52, 22, 10.0, 24);
     s->ecm_power_kw = 7;
-    add_weapon(s, WPN_CRUISE_MISSILE, "3M-54 Kalibr", 260, 0.70, 170, 1, 110, 8, 0.80, 1400, 0, 0.88);
+    add_weapon(s, WPN_CRUISE_MISSILE, "3M-54 Kalibr", 160, 0.58, 170, 1, 110, 8, 0.80, 1400, 0, 0.75);
     add_weapon(s, WPN_TORPEDO, "USET-80", 18, 0.70, 195, 1, 85, 28, 50, 830, 0, 0.68);
 }
 
