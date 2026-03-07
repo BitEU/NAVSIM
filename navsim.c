@@ -345,14 +345,16 @@ static void update_projectile_physics(Projectile *p, double dt) {
         p->vz -= GRAVITY * 3.28084 * dt; /* ft/s² */
     }
     
-    /* Apply drag */
+    /* Apply drag (simplified model - missiles use minimal drag) */
     double v_total_ms = sqrt(
         (p->vx * 1852.0) * (p->vx * 1852.0) +
         (p->vy * 1852.0) * (p->vy * 1852.0) +
         (p->vz * 0.3048) * (p->vz * 0.3048)
     );
     
-    double drag_force = 0.5 * AIR_DENSITY_SL * p->drag_coeff * v_total_ms * v_total_ms;
+    /* Reference area estimate: 0.2 m² for missiles, 0.01 m² for shells */
+    double ref_area = (p->type == WPN_SSM || p->type == WPN_CRUISE_MISSILE) ? 0.2 : 0.01;
+    double drag_force = 0.5 * AIR_DENSITY_SL * p->drag_coeff * ref_area * v_total_ms * v_total_ms;
     double drag_accel = drag_force / p->mass_kg;
     
     if (v_total_ms > 0.1) {
@@ -741,7 +743,6 @@ static void phase_detect(int tick) {
         for (int j = 0; j < num_ships; j++) {
             if (i == j || !ships[j].alive) continue;
             if (ships[i].side == ships[j].side) continue;
-            if (ships[j].detected) continue;
 
             double d = dist_nm(&ships[i], &ships[j]);
             
@@ -938,6 +939,16 @@ static void phase_weapons(int tick) {
         for (int i = 0; i < num_ships; i++) {
             if (!ships[i].alive) continue;
             if (strcmp(ships[i].name, projectiles[p].attacker) == 0) continue;
+            
+            /* Find attacker's side and skip friendly ships */
+            Side attacker_side = SIDE_NATO;
+            for (int si = 0; si < num_ships; si++) {
+                if (strcmp(ships[si].name, projectiles[p].attacker) == 0) {
+                    attacker_side = ships[si].side;
+                    break;
+                }
+            }
+            if (ships[i].side == attacker_side) continue;
             
             double dx = projectiles[p].x - ships[i].x;
             double dy = projectiles[p].y - ships[i].y;
