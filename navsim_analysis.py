@@ -198,8 +198,10 @@ def analyze_single_battle(records, ships):
         print(f"  {YELLOW}→ Roughly even exchange{RESET}")
 
 
-def run_monte_carlo(n_runs, sim_path="./navsim"):
+def run_monte_carlo(n_runs, sim_path=None):
     """Run the simulator N times and aggregate results."""
+    if sim_path is None:
+        sim_path = "navsim.exe" if os.name == 'nt' else "./navsim"
     print_header(f"MONTE CARLO ANALYSIS ({n_runs} RUNS)")
     print(f"\n  Running {n_runs} simulations...\n")
 
@@ -218,7 +220,7 @@ def run_monte_carlo(n_runs, sim_path="./navsim"):
         # Run simulation silently
         result = subprocess.run(
             [sim_path, str(seed)],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
         )
 
         ships = load_ship_status("ship_status.csv")
@@ -316,9 +318,13 @@ def main():
 
     if monte_carlo > 0:
         # Compile if needed
-        if not os.path.exists("./navsim"):
+        exe_name = "navsim.exe" if os.name == 'nt' else "navsim"
+        if not os.path.exists(exe_name):
             print(f"  {YELLOW}Compiling navsim...{RESET}")
-            os.system("gcc -O2 -o navsim navsim.c -lm")
+            if os.name == 'nt':
+                os.system("gcc -O2 -Wall -o navsim.exe navsim.c -lm")
+            else:
+                os.system("gcc -O2 -o navsim navsim.c -lm")
         run_monte_carlo(monte_carlo)
     else:
         records = load_battle_log()

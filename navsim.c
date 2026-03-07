@@ -62,11 +62,13 @@ static void setup_console(void) {
 }
 
 /* ── Configuration ───────────────────────────────────────── */
-#define MAX_SHIPS        16
-#define MAX_WEAPONS       6
+#define MAX_SHIPS        24
+#define MAX_WEAPONS       8
 #define MAX_NAME         32
-#define MAX_TICK       1200   /* 20 minutes at 1-second ticks */
-#define GRID_SIZE       200   /* nautical miles */
+#define MAX_TICK       3600   /* 60 minutes at 1-second ticks */
+#define GRID_SIZE       300   /* nautical miles */
+#define MAX_PROJECTILES 512   /* In-flight projectiles */
+#define MAX_COMPARTMENTS 12   /* Ship damage compartments */
 #define LOG_FILE    "battle_log.csv"
 
 /* ── RNG (xoshiro128** for reproducibility) ──────────────── */
@@ -120,8 +122,10 @@ typedef enum {
     CLASS_CRUISER,
     CLASS_DESTROYER,
     CLASS_FRIGATE,
+    CLASS_CORVETTE,
     CLASS_SUBMARINE,
-    CLASS_MISSILE_BOAT
+    CLASS_MISSILE_BOAT,
+    CLASS_AMPHIBIOUS
 } ShipClass;
 
 typedef enum {
@@ -130,20 +134,87 @@ typedef enum {
     WPN_TORPEDO,
     WPN_GUN_5IN,
     WPN_GUN_130MM,
-    WPN_CIWS
+    WPN_GUN_76MM,
+    WPN_GUN_ADVANCED,
+    WPN_RAILGUN,
+    WPN_CIWS,
+    WPN_CRUISE_MISSILE,
+    WPN_ASROC
 } WeaponType;
 
+typedef enum {
+    RADAR_S_BAND,  /* 2-4 GHz, long range search */
+    RADAR_X_BAND,  /* 8-12 GHz, fire control */
+    RADAR_L_BAND,  /* 1-2 GHz, early warning */
+    RADAR_C_BAND   /* 4-8 GHz, tracking */
+} RadarBand;
+
+typedef enum {
+    COMP_BOW,
+    COMP_BRIDGE,
+    COMP_FORWARD_WEAPONS,
+    COMP_MIDSHIP_PORT,
+    COMP_MIDSHIP_STBD,
+    COMP_ENGINE,
+    COMP_AFT_WEAPONS,
+    COMP_STERN,
+    COMP_RADAR,
+    COMP_COMMS
+} Compartment;
+
 /* ── Data Structures ─────────────────────────────────────── */
+
+/* Ballistic projectile in flight */
+typedef struct {
+    int        active;
+    char       weapon_name[MAX_NAME];
+    char       attacker[MAX_NAME];
+    char       target[MAX_NAME];
+    double     x, y, z;        /* Position (NM, NM, feet) */
+    double     vx, vy, vz;     /* Velocity (NM/s, NM/s, ft/s) */
+    double     launch_time;    /* Tick launched */
+    double     mass_kg;        /* Projectile mass */
+    double     drag_coeff;     /* Aerodynamic drag */
+    double     damage;         /* Damage on impact */
+    WeaponType type;
+} Projectile;
+
+/* Radar system */
+typedef struct {
+    RadarBand  band;
+    double     power_kw;       /* Transmit power */
+    double     gain_db;        /* Antenna gain */
+    double     frequency_ghz;  /* Operating frequency */
+    double     range_nm;       /* Detection range */
+    double     azimuth_res;    /* Azimuth resolution (deg) */
+    int        jammed;         /* Jamming status */
+    double     jam_strength;   /* Jamming effectiveness */
+} RadarSystem;
+
+/* Damage compartment */
+typedef struct {
+    Compartment type;
+    double      integrity;     /* 0.0-1.0 */
+    int         flooding;      /* Flooding status */
+    int         on_fire;       /* Fire status */
+    double      flood_rate;    /* m³/minute */
+} DamageCompartment;
+
 typedef struct {
     WeaponType type;
     char       name[MAX_NAME];
-    double     range_nm;      /* effective range in NM */
-    double     p_hit;         /* base probability of hit */
-    double     damage;        /* damage points on hit */
-    int        salvo_size;    /* rounds per salvo */
-    int        reload_ticks;  /* ticks between salvos */
-    int        ammo;          /* remaining rounds */
-    int        cooldown;      /* current cooldown counter */
+    double     range_nm;       /* effective range in NM */
+    double     p_hit;          /* base probability of hit */
+    double     damage;         /* damage points on hit */
+    int        salvo_size;     /* rounds per salvo */
+    int        reload_ticks;   /* ticks between salvos */
+    int        ammo;           /* remaining rounds */
+    int        cooldown;       /* current cooldown counter */
+    /* Ballistics parameters */
+    double     muzzle_velocity_mps; /* m/s for guns, mach for missiles */
+    double     projectile_mass_kg;
+    double     elevation_angle;     /* Launch angle in degrees */
+    double     guidance_quality;    /* 0-1, for missiles */
 } Weapon;
 
 typedef struct {
@@ -153,18 +224,34 @@ typedef struct {
     ShipClass  ship_class;
 
     /* Position & movement */
-    double     x, y;          /* NM from origin */
-    double     heading;       /* degrees, 0=north */
-    double     speed_kts;     /* current speed */
+    double     x, y;           /* NM from origin */
+    double     heading;        /* degrees, 0=north */
+    double     speed_kts;      /* current speed */
     double     max_speed_kts;
 
     /* Combat */
     double     hp;
     double     max_hp;
-    double     armor;         /* damage reduction factor 0-1 */
-    double     radar_range_nm;
-    double     rcs;           /* radar cross section (detectability) */
-    int        detected;      /* has been detected by enemy */
+    double     armor;          /* damage reduction factor 0-1 */
+    double     rcs;            /* radar cross section (detectability) */
+    int        detected;
+    
+    /* Radar systems */
+    RadarSystem search_radar;
+    RadarSystem fire_control_radar;
+    
+    /* Electronic warfare */
+    double     ecm_power_kw;   /* ECM jammer power */
+    double     esm_sensitivity;/* ESM receiver sensitivity */
+    int        chaff_charges;  /* Chaff remaining */
+    int        flare_charges;  /* Flares remaining */
+    
+    /* Damage control */
+    DamageCompartment compartments[MAX_COMPARTMENTS];
+    int        crew_casualties;
+    double     flooding_total; /* Total water ingress (tons) */
+    double     list_angle;     /* Ship list in degrees */
+    int        speed_reduced;  /* Engine damage flag */
 
     /* Weapons */
     Weapon     weapons[MAX_WEAPONS];
@@ -187,17 +274,116 @@ typedef struct {
     int    kill;
 } EngagementRecord;
 
+/* ── Forward Declarations ────────────────────────────────── */
+static double dist_nm(const Ship *a, const Ship *b);
+static double bearing_deg(const Ship *from, const Ship *to);
+
 /* ── Globals ─────────────────────────────────────────────── */
 static Ship ships[MAX_SHIPS];
 static int  num_ships = 0;
+static Projectile projectiles[MAX_PROJECTILES];
+static int  num_projectiles = 0;
 static EngagementRecord records[8192];
 static int  num_records = 0;
+
+/* Environmental constants */
+#define AIR_DENSITY_SL  1.225    /* kg/m³ at sea level */
+#define GRAVITY         9.81     /* m/s² */
+#define WIND_SPEED      5.0      /* knots, random component */
+
+/* ── Ballistics Physics ──────────────────────────────────── */
+
+static void init_projectile(Projectile *p, Ship *attacker, Ship *target,
+                            Weapon *wpn, int tick) {
+    p->active = 1;
+    strncpy(p->weapon_name, wpn->name, MAX_NAME - 1);
+    strncpy(p->attacker, attacker->name, MAX_NAME - 1);
+    strncpy(p->target, target->name, MAX_NAME - 1);
+    p->x = attacker->x;
+    p->y = attacker->y;
+    p->z = 50.0; /* Launch height ~50 feet */
+    p->launch_time = tick;
+    p->mass_kg = wpn->projectile_mass_kg;
+    p->damage = wpn->damage;
+    p->type = wpn->type;
+    p->drag_coeff = 0.3; /* Aerodynamic drag coefficient */
+    
+    /* Calculate initial velocity vector */
+    double range_m = wpn->range_nm * 1852.0; /* NM to meters */
+    double v0 = wpn->muzzle_velocity_mps;
+    
+    if (wpn->type == WPN_SSM || wpn->type == WPN_CRUISE_MISSILE) {
+        /* Missiles: direct trajectory with guidance */
+        double dx = target->x - attacker->x;
+        double dy = target->y - attacker->y;
+        double dist = sqrt(dx * dx + dy * dy);
+        if (dist < 0.001) dist = 0.001;
+        
+        /* Convert mach number to m/s (mach 0.9 = 306 m/s) */
+        v0 = wpn->muzzle_velocity_mps * 340.0;
+        
+        p->vx = (dx / dist) * v0 / 1852.0; /* Convert to NM/s */
+        p->vy = (dy / dist) * v0 / 1852.0;
+        p->vz = 0; /* Cruise at constant altitude */
+    } else {
+        /* Guns: ballistic arc */
+        double angle_rad = wpn->elevation_angle * M_PI / 180.0;
+        double bearing = bearing_deg(attacker, target) * M_PI / 180.0;
+        
+        double v_horiz = v0 * cos(angle_rad);
+        p->vx = sin(bearing) * v_horiz / 1852.0; /* to NM/s */
+        p->vy = cos(bearing) * v_horiz / 1852.0;
+        p->vz = v0 * sin(angle_rad) * 3.28084; /* to ft/s */
+    }
+}
+
+static void update_projectile_physics(Projectile *p, double dt) {
+    if (!p->active) return;
+    
+    /* Apply gravity (for ballistic shells) */
+    if (p->type != WPN_SSM && p->type != WPN_CRUISE_MISSILE) {
+        p->vz -= GRAVITY * 3.28084 * dt; /* ft/s² */
+    }
+    
+    /* Apply drag */
+    double v_total_ms = sqrt(
+        (p->vx * 1852.0) * (p->vx * 1852.0) +
+        (p->vy * 1852.0) * (p->vy * 1852.0) +
+        (p->vz * 0.3048) * (p->vz * 0.3048)
+    );
+    
+    double drag_force = 0.5 * AIR_DENSITY_SL * p->drag_coeff * v_total_ms * v_total_ms;
+    double drag_accel = drag_force / p->mass_kg;
+    
+    if (v_total_ms > 0.1) {
+        p->vx -= (p->vx * 1852.0 / v_total_ms) * drag_accel * dt / 1852.0;
+        p->vy -= (p->vy * 1852.0 / v_total_ms) * drag_accel * dt / 1852.0;
+        p->vz -= (p->vz * 0.3048 / v_total_ms) * drag_accel * dt * 3.28084;
+    }
+    
+    /* Update position */
+    p->x += p->vx * dt;
+    p->y += p->vy * dt;
+    p->z += p->vz * dt;
+    
+    /* Check impact */
+    if (p->z <= 0) {
+        p->active = 0; /* Hit water */
+    }
+    
+    /* Out of bounds check */
+    if (p->x < -50 || p->x > GRID_SIZE + 50 ||
+        p->y < -50 || p->y > GRID_SIZE + 50) {
+        p->active = 0;
+    }
+}
 
 /* ── Ship Templates ──────────────────────────────────────── */
 
 static void add_weapon(Ship *s, WeaponType t, const char *name,
                        double range, double phit, double dmg,
-                       int salvo, int reload, int ammo) {
+                       int salvo, int reload, int ammo,
+                       double muzzle_vel, double mass, double elev, double guidance) {
     if (s->num_weapons >= MAX_WEAPONS) return;
     Weapon *w = &s->weapons[s->num_weapons++];
     w->type = t;
@@ -209,11 +395,27 @@ static void add_weapon(Ship *s, WeaponType t, const char *name,
     w->reload_ticks = reload;
     w->ammo = ammo;
     w->cooldown = 0;
+    w->muzzle_velocity_mps = muzzle_vel;
+    w->projectile_mass_kg = mass;
+    w->elevation_angle = elev;
+    w->guidance_quality = guidance;
+}
+
+static void init_radar(RadarSystem *r, RadarBand band, double power,
+                       double gain, double freq, double range) {
+    r->band = band;
+    r->power_kw = power;
+    r->gain_db = gain;
+    r->frequency_ghz = freq;
+    r->range_nm = range;
+    r->azimuth_res = 1.0;
+    r->jammed = 0;
+    r->jam_strength = 0;
 }
 
 static Ship *add_ship(Side side, const char *name, const char *hull,
                       ShipClass cls, double hp, double armor,
-                      double max_spd, double radar, double rcs) {
+                      double max_spd, double rcs) {
     if (num_ships >= MAX_SHIPS) return NULL;
     Ship *s = &ships[num_ships++];
     memset(s, 0, sizeof(Ship));
@@ -226,10 +428,27 @@ static Ship *add_ship(Side side, const char *name, const char *hull,
     s->armor = armor;
     s->max_speed_kts = max_spd;
     s->speed_kts = max_spd * 0.7;
-    s->radar_range_nm = radar;
     s->rcs = rcs;
     s->alive = 1;
     s->detected = 0;
+    s->ecm_power_kw = 0;
+    s->esm_sensitivity = 0.5;
+    s->chaff_charges = 20;
+    s->flare_charges = 20;
+    s->crew_casualties = 0;
+    s->flooding_total = 0;
+    s->list_angle = 0;
+    s->speed_reduced = 0;
+    
+    /* Initialize compartments */
+    for (int i = 0; i < MAX_COMPARTMENTS; i++) {
+        s->compartments[i].type = i;
+        s->compartments[i].integrity = 1.0;
+        s->compartments[i].flooding = 0;
+        s->compartments[i].on_fire = 0;
+        s->compartments[i].flood_rate = 0;
+    }
+    
     return s;
 }
 
@@ -237,73 +456,249 @@ static Ship *add_ship(Side side, const char *name, const char *hull,
 static void build_scenario(void) {
     Ship *s;
 
-    /* ── NATO Task Force (spawns west side) ── */
-
-    s = add_ship(SIDE_NATO, "USS Ticonderoga", "CG-47 Ticonderoga",
-                 CLASS_CRUISER, 280, 0.15, 30, 150, 0.6);
-    s->x = 50 + rng_uniform() * 20; s->y = 90 + rng_uniform() * 20;
+    /* ── NATO Battle Group (spawns west side) ── */
+    
+    /* Carrier Strike Group */
+    s = add_ship(SIDE_NATO, "USS Nimitz", "CVN-68",
+                 CLASS_CARRIER, 950, 0.25, 30, 1.2);
+    s->x = 40 + rng_uniform() * 15; s->y = 140 + rng_uniform() * 20;
     s->heading = 90;
-    add_weapon(s, WPN_SSM,   "Harpoon RGM-84",  65, 0.72, 85, 2, 45, 8);
-    add_weapon(s, WPN_SAM,   "SM-2 Standard",   90, 0.65, 40, 2, 30, 68);
-    add_weapon(s, WPN_GUN_5IN,"Mk 45 5\"/54",   13, 0.45, 25, 3, 10, 600);
-    add_weapon(s, WPN_CIWS,  "Phalanx CIWS",     1, 0.55, 15, 1,  5, 1550);
+    init_radar(&s->search_radar, RADAR_S_BAND, 500, 45, 3.0, 180);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 200, 40, 9.5, 120);
+    s->ecm_power_kw = 150;
+    add_weapon(s, WPN_SAM, "Sea Sparrow", 10, 0.60, 35, 2, 25, 40, 2.5, 180, 0, 0.75);
+    add_weapon(s, WPN_CIWS, "Phalanx CIWS", 1.5, 0.62, 18, 1, 3, 2000, 1100, 0.1, 85, 0.9);
 
-    s = add_ship(SIDE_NATO, "USS Spruance", "DD-963 Spruance",
-                 CLASS_DESTROYER, 200, 0.10, 33, 120, 0.55);
-    s->x = 55 + rng_uniform() * 15; s->y = 105 + rng_uniform() * 15;
+    s = add_ship(SIDE_NATO, "USS Ticonderoga", "CG-47",
+                 CLASS_CRUISER, 320, 0.18, 32, 0.65);
+    s->x = 48 + rng_uniform() * 20; s->y = 130 + rng_uniform() * 20;
+    s->heading = 90;
+    init_radar(&s->search_radar, RADAR_S_BAND, 350, 42, 3.3, 170);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 180, 38, 9.0, 110);
+    s->ecm_power_kw = 80;
+    add_weapon(s, WPN_CRUISE_MISSILE, "Tomahawk BGM-109", 280, 0.78, 180, 1, 90, 4, 0.72, 1400, 0, 0.92);
+    add_weapon(s, WPN_SSM, "Harpoon RGM-84", 70, 0.75, 95, 2, 45, 16, 0.85, 520, 0, 0.88);
+    add_weapon(s, WPN_SAM, "SM-2MR Standard", 95, 0.68, 48, 2, 28, 96, 3.5, 700, 0, 0.82);
+    add_weapon(s, WPN_GUN_5IN, "Mk 45 5\"/54", 14, 0.48, 28, 4, 8, 680, 808, 70, 45, 0);
+    add_weapon(s, WPN_CIWS, "Phalanx CIWS", 1.5, 0.62, 18, 1, 3, 2000, 1100, 0.1, 85, 0.9);
+
+    s = add_ship(SIDE_NATO, "USS Arleigh Burke", "DDG-51",
+                 CLASS_DESTROYER, 290, 0.15, 33, 0.55);
+    s->x = 55 + rng_uniform() * 18; s->y = 150 + rng_uniform() * 18;
+    s->heading = 88;
+    init_radar(&s->search_radar, RADAR_S_BAND, 320, 40, 3.2, 160);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 160, 36, 9.2, 105);
+    s->ecm_power_kw = 60;
+    add_weapon(s, WPN_SSM, "Harpoon RGM-84", 70, 0.75, 95, 2, 45, 16, 0.85, 520, 0, 0.88);
+    add_weapon(s, WPN_SAM, "SM-2 Standard", 90, 0.66, 45, 2, 30, 90, 3.5, 700, 0, 0.80);
+    add_weapon(s, WPN_GUN_5IN, "Mk 45 5\"/62", 15, 0.50, 30, 4, 7, 700, 870, 70, 45, 0);
+    add_weapon(s, WPN_CIWS, "Phalanx CIWS", 1.5, 0.62, 18, 1, 3, 1800, 1100, 0.1, 85, 0.9);
+    add_weapon(s, WPN_ASROC, "RUM-139 VL-ASROC", 15, 0.58, 110, 1, 70, 24, 2.8, 400, 0, 0.70);
+
+    s = add_ship(SIDE_NATO, "USS Spruance", "DD-963",
+                 CLASS_DESTROYER, 230, 0.12, 33, 0.58);
+    s->x = 58 + rng_uniform() * 15; s->y = 110 + rng_uniform() * 15;
     s->heading = 85;
-    add_weapon(s, WPN_SSM,    "Harpoon RGM-84", 65, 0.72, 85, 2, 45, 8);
-    add_weapon(s, WPN_TORPEDO,"Mk 46 Torpedo",  5,  0.60, 120,1, 60, 6);
-    add_weapon(s, WPN_GUN_5IN,"Mk 45 5\"/54",  13, 0.45,  25, 3, 10, 500);
-    add_weapon(s, WPN_CIWS,   "Phalanx CIWS",   1, 0.55,  15, 1,  5, 1550);
+    init_radar(&s->search_radar, RADAR_S_BAND, 280, 38, 3.0, 130);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 140, 34, 9.0, 95);
+    s->ecm_power_kw = 40;
+    add_weapon(s, WPN_SSM, "Harpoon RGM-84", 70, 0.75, 95, 2, 45, 8, 0.85, 520, 0, 0.88);
+    add_weapon(s, WPN_TORPEDO, "Mk 46 ASW", 6, 0.62, 130, 1, 65, 12, 45, 235, 0, 0.65);
+    add_weapon(s, WPN_GUN_5IN, "Mk 45 5\"/54", 14, 0.48, 28, 4, 8, 600, 808, 70, 45, 0);
+    add_weapon(s, WPN_CIWS, "Phalanx CIWS", 1.5, 0.62, 18, 1, 3, 1800, 1100, 0.1, 85, 0.9);
 
-    s = add_ship(SIDE_NATO, "USS Knox", "FF-1052 Knox",
-                 CLASS_FRIGATE, 140, 0.08, 27, 80, 0.45);
-    s->x = 45 + rng_uniform() * 15; s->y = 80 + rng_uniform() * 15;
+    s = add_ship(SIDE_NATO, "USS Oliver H. Perry", "FFG-7",
+                 CLASS_FRIGATE, 185, 0.10, 29, 0.48);
+    s->x = 43 + rng_uniform() * 15; s->y = 95 + rng_uniform() * 20;
+    s->heading = 92;
+    init_radar(&s->search_radar, RADAR_S_BAND, 220, 35, 3.1, 110);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 120, 32, 9.1, 85);
+    s->ecm_power_kw = 25;
+    add_weapon(s, WPN_SSM, "Harpoon RGM-84", 70, 0.75, 95, 2, 50, 4, 0.85, 520, 0, 0.88);
+    add_weapon(s, WPN_SAM, "SM-1MR Standard", 25, 0.58, 35, 1, 22, 40, 2.5, 450, 0, 0.70);
+    add_weapon(s, WPN_GUN_76MM, "Mk 75 76mm", 10, 0.42, 20, 5, 6, 500, 925, 22, 50, 0);
+    add_weapon(s, WPN_CIWS, "Phalanx CIWS", 1.5, 0.62, 18, 1, 3, 1500, 1100, 0.1, 85, 0.9);
+    
+    s = add_ship(SIDE_NATO, "USS Knox", "FF-1052",
+                 CLASS_FRIGATE, 155, 0.09, 27, 0.45);
+    s->x = 45 + rng_uniform() * 15; s->y = 75 + rng_uniform() * 18;
     s->heading = 95;
-    add_weapon(s, WPN_TORPEDO,"Mk 46 Torpedo",  5, 0.60, 120, 1, 60, 6);
-    add_weapon(s, WPN_GUN_5IN,"Mk 42 5\"/38",  10, 0.40,  22, 2, 12, 400);
+    init_radar(&s->search_radar, RADAR_S_BAND, 180, 32, 3.0, 85);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 100, 30, 9.0, 70);
+    s->ecm_power_kw = 18;
+    add_weapon(s, WPN_TORPEDO, "Mk 46 ASW", 6, 0.62, 130, 1, 65, 16, 45, 235, 0, 0.65);
+    add_weapon(s, WPN_GUN_5IN, "Mk 42 5\"/38", 11, 0.42, 24, 3, 10, 450, 762, 68, 42, 0);
+    add_weapon(s, WPN_ASROC, "ASROC", 8, 0.52, 100, 1, 80, 16, 2.2, 350, 0, 0.60);
+
+    s = add_ship(SIDE_NATO, "USS Independence", "LCS-2",
+                 CLASS_CORVETTE, 110, 0.06, 45, 0.28);
+    s->x = 50 + rng_uniform() * 10; s->y = 155 + rng_uniform() * 15;
+    s->heading = 88;
+    init_radar(&s->search_radar, RADAR_S_BAND, 160, 30, 3.2, 75);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 90, 28, 9.3, 60);
+    s->ecm_power_kw = 15;
+    add_weapon(s, WPN_SSM, "NSM", 100, 0.72, 85, 2, 55, 8, 0.95, 407, 0, 0.90);
+    add_weapon(s, WPN_GUN_76MM, "Mk 110 57mm", 9, 0.45, 18, 6, 5, 600, 1000, 25, 52, 0);
+    add_weapon(s, WPN_CIWS, "SeaRAM", 5, 0.58, 25, 1, 12, 116, 2.2, 280, 0, 0.85);
+
+    s = add_ship(SIDE_NATO, "HDMS Absalon", "L16 Absalon",
+                 CLASS_FRIGATE, 175, 0.11, 24, 0.52);
+    s->x = 42 + rng_uniform() * 12; s->y = 120 + rng_uniform() * 15;
+    s->heading = 93;
+    init_radar(&s->search_radar, RADAR_S_BAND, 200, 34, 3.0, 100);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 110, 31, 9.1, 75);
+    s->ecm_power_kw = 22;
+    add_weapon(s, WPN_SSM, "Harpoon RGM-84", 70, 0.75, 95, 2, 50, 16, 0.85, 520, 0, 0.88);
+    add_weapon(s, WPN_GUN_76MM, "Mk 110 76mm", 12, 0.44, 21, 5, 6, 480, 925, 22, 48, 0);
+    add_weapon(s, WPN_CIWS, "Millennium Gun", 2, 0.56, 16, 1, 4, 1000, 1000, 35, 75, 0.88);
 
     s = add_ship(SIDE_NATO, "USS Los Angeles", "SSN-688",
-                 CLASS_SUBMARINE, 160, 0.05, 32, 40, 0.10);
-    s->x = 60 + rng_uniform() * 10; s->y = 75 + rng_uniform() * 30;
-    s->heading = 80;
-    add_weapon(s, WPN_SSM,    "Harpoon UGM-84",65, 0.70, 85,  2, 50, 4);
-    add_weapon(s, WPN_TORPEDO,"Mk 48 ADCAP",   20, 0.75, 200, 1, 90, 22);
+                 CLASS_SUBMARINE, 180, 0.06, 32, 0.12);
+    s->x = 62 + rng_uniform() * 10; s->y = 70 + rng_uniform() * 35;
+    s->heading = 82;
+    init_radar(&s->search_radar, RADAR_S_BAND, 80, 25, 3.5, 45);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 50, 22, 10.0, 25);
+    s->ecm_power_kw = 8;
+    add_weapon(s, WPN_CRUISE_MISSILE, "Tomahawk UGM-109", 280, 0.76, 180, 1, 120, 8, 0.72, 1400, 0, 0.90);
+    add_weapon(s, WPN_SSM, "Harpoon UGM-84", 70, 0.73, 95, 2, 55, 4, 0.85, 520, 0, 0.86);
+    add_weapon(s, WPN_TORPEDO, "Mk 48 ADCAP", 22, 0.78, 240, 1, 95, 26, 55, 1663, 0, 0.72);
 
-    /* ── Warsaw Pact Task Force (spawns east side) ── */
+    s = add_ship(SIDE_NATO, "USS Virginia", "SSN-774",
+                 CLASS_SUBMARINE, 195, 0.07, 34, 0.10);
+    s->x = 68 + rng_uniform() * 10; s->y = 85 + rng_uniform() * 30;
+    s->heading = 78;
+    init_radar(&s->search_radar, RADAR_S_BAND, 85, 26, 3.4, 48);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 55, 24, 9.8, 28);
+    s->ecm_power_kw = 10;
+    add_weapon(s, WPN_CRUISE_MISSILE, "Tomahawk UGM-109", 280, 0.78, 180, 1, 120, 12, 0.72, 1400, 0, 0.92);
+    add_weapon(s, WPN_TORPEDO, "Mk 48 ADCAP", 22, 0.80, 240, 1, 95, 26, 55, 1663, 0, 0.74);
+
+    /* ── Warsaw Pact Battle Group (spawns east side) ── */
+    
+    s = add_ship(SIDE_PACT, "Kuznetsov", "Pr.1143.5",
+                 CLASS_CARRIER, 880, 0.22, 29, 1.3);
+    s->x = 245 + rng_uniform() * 15; s->y = 135 + rng_uniform() * 20;
+    s->heading = 270;
+    init_radar(&s->search_radar, RADAR_S_BAND, 480, 43, 2.9, 175);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 190, 38, 5.5, 115);
+    s->ecm_power_kw = 140;
+    add_weapon(s, WPN_SSM, "P-700 Granit", 340, 0.62, 165, 2, 70, 12, 2.5, 7000, 0, 0.85);
+    add_weapon(s, WPN_SAM, "Kinzhal SAM", 12, 0.56, 40, 2, 18, 192, 2.8, 330, 0, 0.76);
+    add_weapon(s, WPN_CIWS, "AK-630M", 1.5, 0.54, 15, 1, 3, 3000, 900, 30, 80, 0.90);
 
     s = add_ship(SIDE_PACT, "Slava", "Pr.1164 Atlant",
-                 CLASS_CRUISER, 300, 0.18, 32, 140, 0.7);
-    s->x = 140 + rng_uniform() * 20; s->y = 85 + rng_uniform() * 25;
+                 CLASS_CRUISER, 340, 0.20, 32, 0.75);
+    s->x = 238 + rng_uniform() * 20; s->y = 125 + rng_uniform() * 25;
     s->heading = 270;
-    add_weapon(s, WPN_SSM,     "P-500 Bazalt",  300, 0.55, 150, 2, 60, 16);
-    add_weapon(s, WPN_SAM,     "S-300F Fort",   75,  0.60,  45, 2, 25, 64);
-    add_weapon(s, WPN_GUN_130MM,"AK-130",       12,  0.40,  28, 4,  8, 500);
-    add_weapon(s, WPN_CIWS,    "AK-630",         1,  0.50,  12, 1,  4, 3000);
+    init_radar(&s->search_radar, RADAR_S_BAND, 360, 41, 3.0, 155);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 170, 36, 5.2, 100);
+    s->ecm_power_kw = 75;
+    add_weapon(s, WPN_SSM, "P-500 Bazalt", 310, 0.60, 165, 2, 65, 16, 2.5, 4800, 0, 0.82);
+    add_weapon(s, WPN_SAM, "S-300F Fort", 80, 0.64, 50, 2, 26, 64, 6.0, 1800, 0, 0.84);
+    add_weapon(s, WPN_GUN_130MM, "AK-130", 13, 0.44, 32, 5, 7, 560, 850, 33.4, 48, 0);
+    add_weapon(s, WPN_CIWS, "AK-630", 1.2, 0.52, 14, 1, 3, 3200, 900, 30, 80, 0.88);
+
+    s = add_ship(SIDE_PACT, "Kirov", "Pr.1144 Orlan",
+                 CLASS_CRUISER, 450, 0.24, 32, 0.85);
+    s->x = 242 + rng_uniform() * 18; s->y = 145 + rng_uniform() * 20;
+    s->heading = 268;
+    init_radar(&s->search_radar, RADAR_S_BAND, 420, 44, 2.8, 185);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 200, 39, 5.0, 125);
+    s->ecm_power_kw = 110;
+    add_weapon(s, WPN_CRUISE_MISSILE, "P-700 Granit", 340, 0.64, 165, 2, 75, 20, 2.5, 7000, 0, 0.86);
+    add_weapon(s, WPN_SAM, "S-300F Fort", 80, 0.64, 50, 2, 26, 96, 6.0, 1800, 0, 0.84);
+    add_weapon(s, WPN_GUN_130MM, "AK-130", 13, 0.44, 32, 5, 7, 640, 850, 33.4, 48, 0);
+    add_weapon(s, WPN_CIWS, "Kashtan CIWS", 2.5, 0.60, 20, 1, 4, 2400, 900, 30, 82, 0.92);
+    add_weapon(s, WPN_ASROC, "RPK-6 Vodopad", 25, 0.54, 115, 1, 75, 20, 2.0, 550, 0, 0.68);
 
     s = add_ship(SIDE_PACT, "Sovremenny", "Pr.956 Sarych",
-                 CLASS_DESTROYER, 210, 0.12, 33, 100, 0.55);
-    s->x = 145 + rng_uniform() * 15; s->y = 110 + rng_uniform() * 15;
+                 CLASS_DESTROYER, 240, 0.14, 33, 0.60);
+    s->x = 248 + rng_uniform() * 15; s->y = 160 + rng_uniform() * 15;
     s->heading = 265;
-    add_weapon(s, WPN_SSM,      "P-270 Moskit", 120, 0.68, 130, 2, 50,  8);
-    add_weapon(s, WPN_SAM,      "Shtil",        25,  0.50,  30, 1, 20, 48);
-    add_weapon(s, WPN_GUN_130MM,"AK-130",       12,  0.40,  28, 4,  8, 500);
-    add_weapon(s, WPN_CIWS,     "AK-630",        1,  0.50,  12, 1,  4, 3000);
+    init_radar(&s->search_radar, RADAR_S_BAND, 300, 38, 3.1, 115);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 145, 34, 5.4, 90);
+    s->ecm_power_kw = 50;
+    add_weapon(s, WPN_SSM, "P-270 Moskit", 125, 0.72, 145, 2, 52, 8, 3.0, 4500, 0, 0.88);
+    add_weapon(s, WPN_SAM, "Shtil", 28, 0.54, 35, 1, 20, 48, 3.5, 715, 0, 0.72);
+    add_weapon(s, WPN_GUN_130MM, "AK-130", 13, 0.44, 32, 5, 7, 560, 850, 33.4, 48, 0);
+    add_weapon(s, WPN_CIWS, "AK-630", 1.2, 0.52, 14, 1, 3, 3200, 900, 30, 80, 0.88);
 
-    s = add_ship(SIDE_PACT, "Nanuchka", "Pr.1234 Ovod",
-                 CLASS_MISSILE_BOAT, 80, 0.05, 34, 50, 0.30);
-    s->x = 135 + rng_uniform() * 10; s->y = 95 + rng_uniform() * 15;
+    s = add_ship(SIDE_PACT, "Udaloy", "Pr.1155 Fregat",
+                 CLASS_DESTROYER, 225, 0.13, 32, 0.58);
+    s->x = 246 + rng_uniform() * 14; s->y = 108 + rng_uniform() * 18;
+    s->heading = 268;
+    init_radar(&s->search_radar, RADAR_S_BAND, 285, 37, 3.0, 110);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 140, 33, 5.3, 85);
+    s->ecm_power_kw = 42;
+    add_weapon(s, WPN_TORPEDO, "SET-65", 15, 0.64, 150, 1, 70, 40, 45, 400, 0, 0.62);
+    add_weapon(s, WPN_GUN_130MM, "AK-100", 11, 0.42, 30, 4, 8, 480, 900, 30, 45, 0);
+    add_weapon(s, WPN_CIWS, "AK-630", 1.2, 0.52, 14, 1, 3, 3200, 900, 30, 80, 0.88);
+    add_weapon(s, WPN_ASROC, "RPK-2 Viyuga", 35, 0.56, 120, 1, 72, 16, 2.2, 565, 0, 0.70);
+
+    s = add_ship(SIDE_PACT, "Krivak II", "Pr.1135M",
+                 CLASS_FRIGATE, 190, 0.11, 30, 0.50);
+    s->x = 240 + rng_uniform() * 12; s->y = 92 + rng_uniform() * 18;
+    s->heading = 272;
+    init_radar(&s->search_radar, RADAR_S_BAND, 240, 35, 3.1, 92);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 125, 31, 5.5, 72);
+    s->ecm_power_kw = 28;
+    add_weapon(s, WPN_SSM, "P-270 Moskit", 125, 0.72, 145, 1, 60, 4, 3.0, 4500, 0, 0.88);
+    add_weapon(s, WPN_SAM, "Osa-M", 12, 0.48, 28, 1, 18, 20, 2.4, 186, 0, 0.65);
+    add_weapon(s, WPN_GUN_76MM, "AK-726", 9, 0.40, 22, 4, 7, 400, 900, 27, 50, 0);
+    add_weapon(s, WPN_TORPEDO, "SET-53M", 8, 0.58, 125, 1, 75, 8, 40, 305, 0, 0.55);
+
+    s = add_ship(SIDE_PACT, "Grisha V", "Pr.1124M",
+                 CLASS_CORVETTE, 125, 0.08, 34, 0.38);
+    s->x = 235 + rng_uniform() * 10; s->y = 75 + rng_uniform() * 15;
     s->heading = 270;
-    add_weapon(s, WPN_SSM,  "P-120 Malakhit",  60, 0.65, 100, 2, 45, 6);
-    add_weapon(s, WPN_CIWS, "AK-630",           1, 0.50,  12, 1,  4, 2000);
+    init_radar(&s->search_radar, RADAR_S_BAND, 180, 32, 3.2, 68);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 95, 28, 5.6, 52);
+    s->ecm_power_kw = 16;
+    add_weapon(s, WPN_SAM, "Osa-M", 12, 0.48, 28, 1, 18, 20, 2.4, 186, 0, 0.65);
+    add_weapon(s, WPN_GUN_76MM, "AK-176", 8, 0.38, 20, 5, 6, 350, 900, 25, 52, 0);
+    add_weapon(s, WPN_TORPEDO, "SET-40", 5, 0.52, 110, 1, 80, 4, 35, 180, 0, 0.48);
+
+    s = add_ship(SIDE_PACT, "Nanuchka III", "Pr.1234.1 Ovod",
+                 CLASS_MISSILE_BOAT, 95, 0.06, 35, 0.32);
+    s->x = 232 + rng_uniform() * 10; s->y = 98 + rng_uniform() * 15;
+    s->heading = 272;
+    init_radar(&s->search_radar, RADAR_S_BAND, 140, 30, 3.3, 55);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 85, 26, 5.7, 42);
+    s->ecm_power_kw = 12;
+    add_weapon(s, WPN_SSM, "P-120 Malakhit", 65, 0.68, 110, 2, 48, 6, 0.95, 870, 0, 0.84);
+    add_weapon(s, WPN_SAM, "Osa-M", 12, 0.48, 28, 1, 18, 16, 2.4, 186, 0, 0.65);
+    add_weapon(s, WPN_GUN_76MM, "AK-176", 8, 0.38, 20, 5, 6, 320, 900, 25, 52, 0);
+
+    s = add_ship(SIDE_PACT, "Tarantul III", "Pr.1241.1MP",
+                 CLASS_MISSILE_BOAT, 85, 0.05, 38, 0.28);
+    s->x = 234 + rng_uniform() * 8; s->y = 118 + rng_uniform() * 12;
+    s->heading = 270;
+    init_radar(&s->search_radar, RADAR_S_BAND, 120, 28, 3.4, 48);
+    init_radar(&s->fire_control_radar, RADAR_C_BAND, 75, 24, 5.8, 36);
+    s->ecm_power_kw = 10;
+    add_weapon(s, WPN_SSM, "P-270 Moskit", 125, 0.72, 145, 2, 55, 4, 3.0, 4500, 0, 0.88);
+    add_weapon(s, WPN_GUN_76MM, "AK-176", 8, 0.38, 20, 5, 6, 280, 900, 25, 52, 0);
+    add_weapon(s, WPN_CIWS, "AK-630", 1.2, 0.52, 14, 1, 3, 2000, 900, 30, 80, 0.88);
 
     s = add_ship(SIDE_PACT, "Victor III", "Pr.671RTM Shchuka",
-                 CLASS_SUBMARINE, 150, 0.05, 30, 35, 0.08);
-    s->x = 150 + rng_uniform() * 10; s->y = 70 + rng_uniform() * 35;
-    s->heading = 260;
-    add_weapon(s, WPN_SSM,     "P-70 Ametist",  40, 0.55,  90, 1, 55, 8);
-    add_weapon(s, WPN_TORPEDO, "53-65 Torpedo", 12, 0.65, 180, 1, 80, 18);
+                 CLASS_SUBMARINE, 170, 0.06, 30, 0.09);
+    s->x = 252 + rng_uniform() * 10; s->y = 68 + rng_uniform() * 35;
+    s->heading = 262;
+    init_radar(&s->search_radar, RADAR_S_BAND, 75, 24, 3.6, 42);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 48, 20, 10.2, 22);
+    s->ecm_power_kw = 6;
+    add_weapon(s, WPN_SSM, "P-70 Ametist", 42, 0.58, 98, 1, 58, 8, 0.95, 560, 0, 0.72);
+    add_weapon(s, WPN_TORPEDO, "USET-80", 18, 0.68, 195, 1, 85, 18, 50, 830, 0, 0.66);
+
+    s = add_ship(SIDE_PACT, "Akula", "Pr.971 Shchuka-B",
+                 CLASS_SUBMARINE, 185, 0.07, 32, 0.08);
+    s->x = 256 + rng_uniform() * 10; s->y = 82 + rng_uniform() * 32;
+    s->heading = 258;
+    init_radar(&s->search_radar, RADAR_S_BAND, 80, 25, 3.5, 45);
+    init_radar(&s->fire_control_radar, RADAR_X_BAND, 52, 22, 10.0, 24);
+    s->ecm_power_kw = 7;
+    add_weapon(s, WPN_CRUISE_MISSILE, "3M-54 Kalibr", 260, 0.70, 170, 1, 110, 8, 0.80, 1400, 0, 0.88);
+    add_weapon(s, WPN_TORPEDO, "USET-80", 18, 0.70, 195, 1, 85, 28, 50, 830, 0, 0.68);
 }
 
 /* ── Utility ─────────────────────────────────────────────── */
@@ -326,7 +721,7 @@ static const char *side_str(Side s) {
 }
 
 static const char *class_str(ShipClass c) {
-    const char *names[] = {"CV","CG","DD","FF","SS","PGG"};
+    const char *names[] = {"CV","CG","DD","FF","FFL","SS","PGG","LPD"};
     return names[c];
 }
 
@@ -349,21 +744,59 @@ static void phase_detect(int tick) {
             if (ships[j].detected) continue;
 
             double d = dist_nm(&ships[i], &ships[j]);
-            /* Detection probability based on radar range, RCS, and distance */
-            double eff_range = ships[i].radar_range_nm * ships[j].rcs;
+            
+            /* Advanced radar detection with ECM/ESM */
+            RadarSystem *radar = &ships[i].search_radar;
+            double radar_range = radar->range_nm;
+            
+            /* Apply ECM jamming effects */
+            if (ships[j].ecm_power_kw > 0 && !radar->jammed) {
+                double jam_effectiveness = ships[j].ecm_power_kw / (radar->power_kw + 1.0);
+                if (jam_effectiveness > 0.3) {
+                    radar_range *= (1.0 - jam_effectiveness * 0.5);
+                    radar->jam_strength = jam_effectiveness;
+                }
+            }
+            
+            /* Radar equation: range based on power, gain, RCS */
+            double eff_range = radar_range * pow(ships[j].rcs, 0.25);
+            
+            /* Multipath effects over water */
+            if (d < 15) { /* Close range */
+                eff_range *= rng_gauss(1.0, 0.08); /* Sea clutter noise */
+            }
+            
             if (d < eff_range) {
-                double p_detect = 1.0 - pow(d / eff_range, 2.0);
-                /* Submarines are harder to detect */
+                double p_detect = 1.0 - pow(d / eff_range, 2.5);
+                
+                /* Frequency-dependent detection */
+                if (radar->band == RADAR_L_BAND) {
+                    p_detect *= 0.85; /* Lower resolution but longer range */
+                } else if (radar->band == RADAR_X_BAND) {
+                    p_detect *= 1.15; /* Better resolution */
+                }
+                
+                /* Submarines are much harder to detect */
                 if (ships[j].ship_class == CLASS_SUBMARINE)
-                    p_detect *= 0.25;
+                    p_detect *= 0.15;
+                    
+                /* Weather effects */
+                p_detect *= rng_gauss(1.0, 0.12);
+                
+                /* Clamp probability */
+                if (p_detect < 0.01) p_detect = 0.01;
+                if (p_detect > 0.98) p_detect = 0.98;
+                
                 if (rng_uniform() < p_detect) {
                     ships[j].detected = 1;
                     if (tick % 30 == 0 || tick < 60) {
+                        const char *jam_note = (radar->jam_strength > 0.3) ? " [JAMMED]" : "";
                         printf("  " ANSI_CYAN "[DETECT]" ANSI_RESET
-                               " %s %s contacts %s %s at %.1f NM, brg %03.0f\n",
+                               " %s %s contacts %s %s at %.1f NM, brg %03.0f%s%s\n",
                                side_str(ships[i].side), ships[i].name,
                                side_str(ships[j].side), ships[j].name,
-                               d, bearing_deg(&ships[i], &ships[j]));
+                               d, bearing_deg(&ships[i], &ships[j]),
+                               jam_note, ANSI_RESET);
                     }
                 }
             }
@@ -431,11 +864,11 @@ static void phase_move(int tick) {
 
 /* ── Weapons Phase ───────────────────────────────────────── */
 static void phase_weapons(int tick) {
+    /* Launch new projectiles */
     for (int i = 0; i < num_ships; i++) {
         Ship *atk = &ships[i];
         if (!atk->alive) continue;
 
-        /* Find priority target: lowest HP detected enemy in range */
         for (int w = 0; w < atk->num_weapons; w++) {
             Weapon *wpn = &atk->weapons[w];
             if (wpn->cooldown > 0) { wpn->cooldown--; continue; }
@@ -451,15 +884,16 @@ static void phase_weapons(int tick) {
                 double d = dist_nm(atk, &ships[j]);
                 if (d > wpn->range_nm) continue;
 
-                /* Torpedoes prefer subs and close targets */
+                /* Target prioritization */
                 double score = (wpn->range_nm - d) / wpn->range_nm;
                 if (wpn->type == WPN_TORPEDO && ships[j].ship_class == CLASS_SUBMARINE)
+                    score += 0.6;
+                if ((wpn->type == WPN_SSM || wpn->type == WPN_CRUISE_MISSILE) &&
+                    ships[j].ship_class == CLASS_CARRIER)
                     score += 0.5;
-                /* SSMs prefer high-value targets */
-                if (wpn->type == WPN_SSM &&
-                    (ships[j].ship_class == CLASS_CRUISER ||
-                     ships[j].ship_class == CLASS_CARRIER))
-                    score += 0.3;
+                if ((wpn->type == WPN_SSM || wpn->type == WPN_CRUISE_MISSILE) &&
+                    ships[j].ship_class == CLASS_CRUISER)
+                    score += 0.35;
 
                 if (score > best_score) {
                     best_score = score;
@@ -478,72 +912,144 @@ static void phase_weapons(int tick) {
             wpn->ammo -= rounds;
             wpn->cooldown = wpn->reload_ticks;
 
-            int total_hits = 0;
-            double total_dmg = 0;
+            /* Launch projectiles */
+            for (int r = 0; r < rounds && num_projectiles < MAX_PROJECTILES; r++) {
+                init_projectile(&projectiles[num_projectiles], atk, def, wpn, tick);
+                num_projectiles++;
+            }
 
-            for (int r = 0; r < rounds; r++) {
-                /* Compute hit probability with range degradation */
-                double p = wpn->p_hit * (1.0 - 0.3 * (d / wpn->range_nm));
-                /* Sea state modifier */
-                p *= rng_gauss(1.0, 0.08);
-                /* ECM modifier */
-                if (def->ship_class == CLASS_CRUISER ||
-                    def->ship_class == CLASS_CARRIER)
-                    p *= 0.85; /* better ECM on capital ships */
-                /* Submarines are harder to hit on surface */
-                if (def->ship_class == CLASS_SUBMARINE && wpn->type == WPN_SSM)
-                    p *= 0.6;
-
-                if (p < 0.05) p = 0.05;
-                if (p > 0.95) p = 0.95;
-
-                if (rng_uniform() < p) {
-                    double dmg = wpn->damage * rng_gauss(1.0, 0.15);
-                    dmg *= (1.0 - def->armor);
-                    if (dmg < 1) dmg = 1;
-                    def->hp -= dmg;
-                    total_hits++;
-                    total_dmg += dmg;
-                    atk->damage_dealt_total += (int)dmg;
+            printf("  " ANSI_YELLOW "[LAUNCH]" ANSI_RESET " %s %s -> %s %s | "
+                   "%s x%d @ %.1f NM\n",
+                   side_str(atk->side), atk->name,
+                   side_str(def->side), def->name,
+                   wpn->name, rounds, d);
+        }
+    }
+    
+    /* Update projectiles and check for impacts */
+    for (int p = 0; p < num_projectiles; p++) {
+        if (!projectiles[p].active) continue;
+        
+        update_projectile_physics(&projectiles[p], 1.0);
+        
+        if (!projectiles[p].active) continue;
+        
+        /* Check for impacts with ships */
+        for (int i = 0; i < num_ships; i++) {
+            if (!ships[i].alive) continue;
+            if (strcmp(ships[i].name, projectiles[p].attacker) == 0) continue;
+            
+            double dx = projectiles[p].x - ships[i].x;
+            double dy = projectiles[p].y - ships[i].y;
+            double dist = sqrt(dx * dx + dy * dy);
+            
+            /* Hit radius: 0.05 NM = ~100 yards */
+            double hit_radius = 0.05;
+            if (ships[i].ship_class == CLASS_CARRIER) hit_radius = 0.15;
+            else if (ships[i].ship_class == CLASS_CRUISER) hit_radius = 0.10;
+            
+            if (dist < hit_radius) {
+                /* Impact! */
+                double dmg = projectiles[p].damage;
+                
+                /* Apply armor */
+                dmg *= (1.0 - ships[i].armor);
+                
+                /* Guided weapons are more accurate */
+                Weapon *orig_wpn = NULL;
+                for (int si = 0; si < num_ships; si++) {
+                    if (strcmp(ships[si].name, projectiles[p].attacker) != 0) continue;
+                    for (int w = 0; w < ships[si].num_weapons; w++) {
+                        if (strcmp(ships[si].weapons[w].name, projectiles[p].weapon_name) == 0) {
+                            orig_wpn = &ships[si].weapons[w];
+                            break;
+                        }
+                    }
                 }
-            }
-
-            int killed = 0;
-            if (def->hp <= 0) {
-                def->hp = 0;
-                def->alive = 0;
-                atk->kills++;
-                killed = 1;
-            }
-
-            /* Log the engagement */
-            if (total_hits > 0 || killed) {
-                const char *hit_color = total_hits > 0 ? ANSI_RED : ANSI_DIM;
-                printf("  %s[FIRE]" ANSI_RESET " %s %s -> %s %s | "
-                       "%s x%d @ %.0f NM | %d/%d hit, %.0f dmg",
-                       hit_color,
-                       side_str(atk->side), atk->name,
-                       side_str(def->side), def->name,
-                       wpn->name, rounds, d,
-                       total_hits, rounds, total_dmg);
+                
+                /* Guidance quality affects damage */
+                if (orig_wpn && orig_wpn->guidance_quality > 0.7) {
+                    dmg *= rng_gauss(1.0, 0.10);
+                } else {
+                    dmg *= rng_gauss(1.0, 0.25);
+                }
+                
+                /* Damage compartments */
+                int comp_hit = (int)(rng_uniform() * MAX_COMPARTMENTS);
+                if (comp_hit < MAX_COMPARTMENTS) {
+                    ships[i].compartments[comp_hit].integrity -= dmg / ships[i].max_hp;
+                    if (ships[i].compartments[comp_hit].integrity < 0.3) {
+                        ships[i].compartments[comp_hit].flooding = 1;
+                        ships[i].compartments[comp_hit].flood_rate = rng_uniform() * 20;
+                    }
+                    if (rng_uniform() < 0.25) {
+                        ships[i].compartments[comp_hit].on_fire = 1;
+                    }
+                }
+                
+                if (dmg < 1) dmg = 1;
+                ships[i].hp -= dmg;
+                
+                /* Find attacker for stats */
+                for (int si = 0; si < num_ships; si++) {
+                    if (strcmp(ships[si].name, projectiles[p].attacker) == 0) {
+                        ships[si].damage_dealt_total += (int)dmg;
+                        break;
+                    }
+                }
+                
+                int killed = 0;
+                if (ships[i].hp <= 0) {
+                    ships[i].hp = 0;
+                    ships[i].alive = 0;
+                    killed = 1;
+                    /* Award kill to attacker */
+                    for (int si = 0; si < num_ships; si++) {
+                        if (strcmp(ships[si].name, projectiles[p].attacker) == 0) {
+                            ships[si].kills++;
+                            break;
+                        }
+                    }
+                }
+                
+                printf("  " ANSI_RED "[IMPACT]" ANSI_RESET " %s -> %s | "
+                       "%.0f dmg",
+                       projectiles[p].weapon_name, ships[i].name, dmg);
                 if (killed)
                     printf(" " ANSI_BOLD ANSI_RED "*** SUNK ***" ANSI_RESET);
-                printf(" [HP: %.0f/%.0f]\n", def->hp, def->max_hp);
-            }
-
-            /* Record for CSV */
-            if (num_records < 8192) {
-                EngagementRecord *rec = &records[num_records++];
-                rec->tick = tick;
-                strncpy(rec->attacker, atk->name, MAX_NAME - 1);
-                strncpy(rec->defender, def->name, MAX_NAME - 1);
-                strncpy(rec->weapon, wpn->name, MAX_NAME - 1);
-                rec->hit = total_hits;
-                rec->damage = total_dmg;
-                rec->defender_hp_after = def->hp;
-                rec->kill = killed;
+                printf(" [HP: %.0f/%.0f]\n", ships[i].hp, ships[i].max_hp);
+                
+                /* Record engagement */
+                if (num_records < 8192) {
+                    EngagementRecord *rec = &records[num_records++];
+                    rec->tick = tick;
+                    strncpy(rec->attacker, projectiles[p].attacker, MAX_NAME - 1);
+                    strncpy(rec->defender, ships[i].name, MAX_NAME - 1);
+                    strncpy(rec->weapon, projectiles[p].weapon_name, MAX_NAME - 1);
+                    rec->hit = 1;
+                    rec->damage = dmg;
+                    rec->defender_hp_after = ships[i].hp;
+                    rec->kill = killed;
+                }
+                
+                projectiles[p].active = 0;
+                break;
             }
         }
+    }
+    
+    /* Clean up inactive projectiles periodically */
+    if (tick % 30 == 0) {
+        int active_count = 0;
+        for (int p = 0; p < num_projectiles; p++) {
+            if (projectiles[p].active) {
+                if (p != active_count) {
+                    projectiles[active_count] = projectiles[p];
+                }
+                active_count++;
+            }
+        }
+        num_projectiles = active_count;
     }
 }
 
@@ -774,15 +1280,21 @@ int main(int argc, char **argv) {
     "    ╚═╝  ╚═══╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝╚═╝     ╚═╝\n"
     ANSI_RESET
     ANSI_DIM
-    "    Cold War Naval Tactical Engagement Simulator\n"
-    "    Monte Carlo Engine v1.0  │  RNG Seed: %u\n"
+    "    Advanced Naval Combat Simulator with Realistic Ballistics & Radar\n"
+    "    Physics Engine v2.0  │  RNG Seed: %u\n"
     ANSI_RESET "\n", seed);
 
     build_scenario();
 
-    printf(ANSI_BOLD "  SCENARIO: North Atlantic Engagement\n" ANSI_RESET);
-    printf("  NATO TF: Ticonderoga CG, Spruance DD, Knox FF, Los Angeles SSN\n");
-    printf("  PACT TF: Slava CG, Sovremenny DD, Nanuchka PGG, Victor III SSN\n\n");
+    printf(ANSI_BOLD "  SCENARIO: North Atlantic Battle Group Engagement\n" ANSI_RESET);
+    printf("  NATO CSG: Nimitz CVN, Ticonderoga CG, Arleigh Burke DDG, Spruance DD,\n");
+    printf("            Oliver H. Perry FFG, Knox FF, Independence LCS, Absalon FF,\n");
+    printf("            Los Angeles SSN, Virginia SSN\n");
+    printf("  PACT BG:  Kuznetsov CV, Slava CG, Kirov CGN, Sovremenny DD, Udaloy DD,\n");
+    printf("            Krivak II FF, Grisha V FFL, Nanuchka III PGG, Tarantul III PGG,\n");
+    printf("            Victor III SSN, Akula SSN\n\n");
+    printf("  " ANSI_CYAN "Features:" ANSI_RESET " Realistic ballistics • Advanced radar modeling\n");
+    printf("             ECM/ESM warfare • Compartmentalized damage • Physics-based projectiles\n\n");
 
     print_status_board(0);
     print_tactical_map();
