@@ -1,0 +1,38 @@
+# NAVSIM Platforms Database
+# Ships participating in the engagement.
+# Team: NATO or PACT
+# Class: CV CG DD FF FFL SS PGG LPD
+# RadarBand / FCRadarBand: S X L C
+# HasTowedArray: 0 or 1
+# STOBAR: 0=CATOBAR/conventional  1=ski-jump (no catapult; reduced strike loads)
+# MaxSorties: total aircraft embarked (0 for non-carriers)
+# HeloCapacity: embarked helicopters (0=none, auto-assigned for DD/CG/FF if missing)
+# FreqHop: 1=radar can frequency hop when jammed, 0=no
+# Link16: 1=has Link-16/CEC data link, 0=no (NATO default=1, PACT default=0)
+# Weapon1..8: must match Name column in weapons.csv (blank = not fitted)
+# SonarPassiveRange / SonarActiveRange: NM (0 for ships with no sonar fitted)
+# NixieCharges: torpedo decoy rounds
+# StartX,StartY: NM from SW corner of 300x300 grid
+# StartHeading: degrees (0=north)
+Team,Class,Name,Hull,HP,Armor,MaxSpeed,RCS,StartX,StartY,StartHeading,RadarBand,RadarPower,RadarGain,RadarFreq,RadarRange,FCRadarBand,FCRadarPower,FCRadarGain,FCRadarFreq,FCRadarRange,ECM_Power,ESM_Sensitivity,Chaff,Flares,Nixie,SonarPassiveRange,SonarActiveRange,HasTowedArray,TowedArrayRange,MaxSorties,STOBAR,HeloCapacity,FreqHop,Link16,Weapon1,Weapon2,Weapon3,Weapon4,Weapon5,Weapon6,Weapon7,Weapon8
+NATO,CV,USS Nimitz,CVN-68,950,0.25,30,1.20,65,150,90,S,500,45,3.0,180,X,200,40,9.5,120,150,0.7,40,40,0,0,0,0,0,70,0,0,1,1,Sea Sparrow BPDMS,Phalanx CIWS,,,,,,
+NATO,CG,USS Ticonderoga,CG-47,320,0.18,32,0.65,75,140,90,S,350,42,3.3,170,X,180,38,9.0,110,80,0.8,20,20,2,12,20,0,0,0,0,2,1,1,Tomahawk BGM-109,Harpoon RGM-84,SM-2MR Standard,AGM-88 HARM,Mk 45 5in54,Phalanx CIWS,,
+NATO,DD,USS Arleigh Burke,DDG-51,290,0.15,33,0.55,82,160,88,S,320,40,3.2,160,X,160,36,9.2,105,60,0.8,20,20,4,15,25,0,0,0,0,2,1,1,Tomahawk BGM-109,Harpoon RGM-84,SM-2MR Standard,Mk 45 5in62,Phalanx CIWS,RUM-139 VL-ASROC,,
+NATO,DD,USS Spruance,DD-963,230,0.12,33,0.58,85,120,85,S,280,38,3.0,130,X,140,34,9.0,95,40,0.7,20,20,2,15,25,0,0,0,0,2,1,1,Tomahawk BGM-109,Harpoon RGM-84,Mk 46 ASW,Mk 45 5in54,Phalanx CIWS,,,
+NATO,FF,USS Oliver H. Perry,FFG-7,185,0.10,29,0.48,70,105,92,S,220,35,3.1,110,X,120,32,9.1,85,25,0.6,20,20,0,10,18,0,0,0,0,2,1,1,Harpoon RGM-84,SM-1MR Standard,Mk 75 76mm,Phalanx CIWS,,,,
+NATO,FF,USS Knox,FF-1052,155,0.09,27,0.45,72,85,95,S,180,32,3.0,85,X,100,30,9.0,70,18,0.6,20,20,0,10,18,0,0,0,0,1,0,1,Mk 46 ASW,Mk 42 5in38,ASROC,,,,,
+NATO,FF,HDMS Absalon,L16 Absalon,175,0.11,24,0.52,68,130,93,S,200,34,3.0,100,X,110,31,9.1,75,22,0.6,20,20,0,8,15,0,0,0,0,1,1,1,Harpoon RGM-84,Mk 110 76mm,Millennium Gun,,,,,
+NATO,FFL,USS Independence,LCS-2,110,0.06,45,0.28,72,165,88,S,160,30,3.2,75,X,90,28,9.3,60,15,0.6,20,20,0,0,0,0,0,0,0,1,1,1,NSM,Mk 110 57mm,SeaRAM,,,,,
+NATO,SS,USS Los Angeles,SSN-688,180,0.06,32,0.12,88,80,82,S,80,25,3.5,45,X,50,22,10.0,25,8,0.5,0,0,2,40,55,0,0,0,0,0,0,1,Tomahawk UGM-109,Harpoon UGM-84,Mk 48 ADCAP,,,,,
+NATO,SS,USS Virginia,SSN-774,195,0.07,34,0.10,92,95,78,S,85,26,3.4,48,X,55,24,9.8,28,10,0.5,0,0,4,45,60,1,55,0,0,0,1,1,Tomahawk UGM-109,Mk 48 ADCAP,,,,,,
+PACT,CV,Kuznetsov,Pr.1143.5,880,0.22,29,1.30,210,145,270,S,480,43,2.9,175,C,190,38,5.5,115,140,0.6,40,40,0,0,0,0,0,20,1,0,0,0,P-700 Granit,Kinzhal SAM,AK-630M,,,,,
+PACT,CG,Slava,Pr.1164 Atlant,340,0.20,32,0.75,205,135,270,S,360,41,3.0,155,C,170,36,5.2,100,75,0.7,20,20,0,8,15,0,0,0,0,0,0,0,P-500 Bazalt,S-300F Fort,AK-130,AK-630,,,,
+PACT,CG,Kirov,Pr.1144 Orlan,450,0.24,32,0.85,208,155,268,S,420,44,2.8,185,C,200,39,5.0,125,110,0.7,20,20,0,8,15,0,0,0,0,3,0,0,P-700 Granit,S-300F Fort,AK-130,Kashtan CIWS,RPK-6 Vodopad,,,
+PACT,DD,Sovremenny,Pr.956 Sarych,240,0.14,33,0.60,215,170,265,S,300,38,3.1,115,C,145,34,5.4,90,50,0.6,20,20,0,6,12,0,0,0,0,1,0,0,P-270 Moskit,Shtil,AK-130,AK-630,,,,
+PACT,DD,Udaloy,Pr.1155 Fregat,225,0.13,32,0.58,212,118,268,S,285,37,3.0,110,C,140,33,5.3,85,42,0.6,20,20,0,10,18,1,35,0,0,2,0,0,SET-65,AK-100,AK-630,RPK-2 Viyuga,,,,
+PACT,FF,Krivak II,Pr.1135M,190,0.11,30,0.50,207,100,272,S,240,35,3.1,92,C,125,31,5.5,72,28,0.5,20,20,0,6,12,0,0,0,0,0,0,0,P-270 Moskit,Osa-M,AK-726,SET-53M,,,,
+PACT,FFL,Grisha V,Pr.1124M,125,0.08,34,0.38,203,82,270,S,180,32,3.2,68,C,95,28,5.6,52,16,0.5,20,20,0,6,10,0,0,0,0,0,0,0,Osa-M,AK-176,SET-40,,,,,
+PACT,PGG,Nanuchka III,Pr.1234.1 Ovod,95,0.06,35,0.32,200,106,272,S,140,30,3.3,55,C,85,26,5.7,42,12,0.5,20,20,0,0,0,0,0,0,0,0,0,0,P-120 Malakhit,Osa-M,AK-176,,,,,
+PACT,PGG,Tarantul III,Pr.1241.1MP,85,0.05,38,0.28,202,126,270,S,120,28,3.4,48,C,75,24,5.8,36,10,0.5,20,20,0,0,0,0,0,0,0,0,0,0,P-270 Moskit,AK-176,AK-630,,,,,
+PACT,SS,Victor III,Pr.671RTM Shchuka,170,0.06,30,0.09,215,78,262,S,75,24,3.6,42,X,48,20,10.2,22,6,0.4,0,0,0,30,45,0,0,0,0,0,0,0,P-70 Ametist,USET-80,,,,,,
+PACT,SS,Akula,Pr.971 Shchuka-B,185,0.07,32,0.08,218,90,258,S,80,25,3.5,45,X,52,22,10.0,24,7,0.4,0,0,0,35,50,1,45,0,0,0,0,0,3M-54 Kalibr,USET-80,,,,,,

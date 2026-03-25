@@ -1,0 +1,162 @@
+tick,time,attacker,defender,weapon,hits,damage,defender_hp_after,kill,event_type,sea_state
+100,01:40,Kuznetsov,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+128,02:08,Kuznetsov,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+150,02:30,Slava,USS Ticonderoga,SM-2MR Standard,1,0.0,320.0,0,sam_intercept,2
+212,03:32,Slava,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+240,04:00,Kirov,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+262,04:22,Kirov,USS Ticonderoga,SM-2MR Standard,1,0.0,320.0,0,sam_intercept,2
+268,04:28,Slava,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+290,04:50,Slava,USS Ticonderoga,SM-2MR Standard,1,0.0,320.0,0,sam_intercept,2
+318,05:18,Kuznetsov,USS Ticonderoga,SM-2MR Standard,1,0.0,320.0,0,sam_intercept,2
+322,05:22,USS Spruance,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+324,05:24,Kuznetsov,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+362,06:02,USS Arleigh Burke,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,2
+374,06:14,USS Virginia,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+405,06:45,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,950.0,0,ciws_intercept,2
+407,06:47,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,950.0,0,ciws_intercept,2
+409,06:49,USS Spruance,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+430,07:10,Slava,USS Ticonderoga,SM-2MR Standard,1,0.0,320.0,0,sam_intercept,2
+432,07:12,Slava,USS Arleigh Burke,Phalanx CIWS,1,0.0,290.0,0,ciws_intercept,2
+436,07:16,Akula,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+453,07:33,Kirov,USS Nimitz,Sea Sparrow BPDMS,1,0.0,950.0,0,sam_intercept,2
+454,07:34,Kuznetsov,USS Arleigh Burke,Phalanx CIWS,1,0.0,290.0,0,ciws_intercept,2
+454,07:34,Kuznetsov,USS Arleigh Burke,Phalanx CIWS,1,0.0,290.0,0,ciws_intercept,2
+461,07:41,USS Ticonderoga,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,2
+476,07:56,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,950.0,0,ciws_intercept,2
+480,08:00,USS Nimitz,Kuznetsov,Air Strike,1,125.2,754.8,0,air_strike,2
+497,08:17,Slava,USS Arleigh Burke,Phalanx CIWS,1,0.0,290.0,0,ciws_intercept,2
+498,08:18,Slava,USS Arleigh Burke,Phalanx CIWS,1,0.0,290.0,0,ciws_intercept,2
+510,08:30,Kuznetsov,USS Nimitz,Air Strike,1,121.1,828.9,0,air_strike,2
+527,08:47,Kuznetsov,USS Arleigh Burke,Phalanx CIWS,1,0.0,290.0,0,ciws_intercept,2
+530,08:50,Kuznetsov,USS Arleigh Burke,Phalanx CIWS,1,0.0,290.0,0,ciws_intercept,2
+539,08:59,USS Los Angeles,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+540,09:00,USS Nimitz,Kuznetsov,Air Strike,1,157.4,597.4,0,air_strike,2
+544,09:04,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,828.9,0,ciws_intercept,2
+544,09:04,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,828.9,0,ciws_intercept,2
+565,09:25,USS Ticonderoga,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+565,09:25,USS Arleigh Burke,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,2
+570,09:30,Kuznetsov,USS Nimitz,Air Strike,1,103.2,725.7,0,air_strike,2
+591,09:51,USS Virginia,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+591,09:51,USS Arleigh Burke,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,2
+595,09:55,Slava,USS Nimitz,Phalanx CIWS,1,0.0,725.7,0,ciws_intercept,2
+595,09:55,Slava,USS Nimitz,Phalanx CIWS,1,0.0,725.7,0,ciws_intercept,2
+600,10:00,USS Nimitz,Kuznetsov,Air Strike,1,139.3,458.1,0,air_strike,2
+613,10:13,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,725.7,0,ciws_intercept,2
+613,10:13,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,725.7,0,ciws_intercept,2
+617,10:17,USS Ticonderoga,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+617,10:17,USS Spruance,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,2
+626,10:26,Akula,USS Ticonderoga,SM-2MR Standard,1,0.0,320.0,0,sam_intercept,2
+628,10:28,Kuznetsov,USS Nimitz,Phalanx CIWS,1,0.0,725.7,0,ciws_intercept,2
+628,10:28,Kuznetsov,USS Nimitz,Phalanx CIWS,1,0.0,725.7,0,ciws_intercept,2
+630,10:30,Kuznetsov,USS Nimitz,Air Strike,1,95.4,630.3,0,air_strike,2
+643,10:43,USS Los Angeles,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+646,10:46,Slava,USS Nimitz,Sea Sparrow BPDMS,1,0.0,630.3,0,sam_intercept,2
+658,10:58,Slava,USS Nimitz,Phalanx CIWS,1,0.0,630.3,0,ciws_intercept,2
+660,11:00,USS Nimitz,Kuznetsov,Air Strike,1,122.1,336.0,0,air_strike,2
+669,11:09,USS Virginia,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+669,11:09,USS Arleigh Burke,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,2
+681,11:21,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,630.3,0,ciws_intercept,2
+681,11:21,Kirov,USS Nimitz,Phalanx CIWS,1,0.0,630.3,0,ciws_intercept,2
+682,11:22,Kuznetsov,USS Ticonderoga,SM-2MR Standard,1,0.0,320.0,0,sam_intercept,2
+688,11:28,Akula,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+690,11:30,Kuznetsov,USS Nimitz,Air Strike,1,129.9,500.4,0,air_strike,2
+695,11:35,USS Ticonderoga,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,2
+695,11:35,USS Spruance,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,2
+697,11:37,Kuznetsov,USS Nimitz,Phalanx CIWS,1,0.0,500.4,0,ciws_intercept,2
+720,12:00,USS Nimitz,Kuznetsov,Air Strike,1,86.7,249.3,0,air_strike,2
+721,12:01,USS Arleigh Burke,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,2
+721,12:01,Slava,USS Nimitz,Sea Sparrow BPDMS,1,0.0,500.4,0,sam_intercept,2
+721,12:01,Slava,USS Nimitz,Phalanx CIWS,1,0.0,500.4,0,ciws_intercept,2
+738,12:18,Slava,USS Ticonderoga,SM-2MR Standard,1,0.0,320.0,0,sam_intercept,3
+744,12:24,Slava,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,3
+747,12:27,USS Virginia,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+747,12:27,USS Spruance,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+750,12:30,Kuznetsov,USS Nimitz,Air Strike,1,126.2,374.2,0,air_strike,3
+772,12:52,Akula,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,3
+780,13:00,USS Nimitz,Kuznetsov,Air Strike,1,107.9,141.5,0,air_strike,3
+782,13:02,USS Ticonderoga,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+799,13:19,USS Los Angeles,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+810,13:30,Kuznetsov,USS Nimitz,Air Strike,1,88.0,286.3,0,air_strike,3
+825,13:45,USS Arleigh Burke,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+840,14:00,USS Nimitz,Kuznetsov,Air Strike,1,165.3,0.0,1,air_strike,3
+851,14:11,USS Spruance,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+872,14:32,Akula,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,3
+877,14:37,USS Los Angeles,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+903,15:03,USS Ticonderoga,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+983,16:23,Akula,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,3
+999,16:39,USS Virginia,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+1007,16:47,USS Los Angeles,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+1025,17:05,USS Ticonderoga,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+1033,17:13,USS Arleigh Burke,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+1051,17:31,USS Spruance,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+1077,17:57,USS Virginia,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+1094,18:14,Akula,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,3
+1111,18:31,USS Los Angeles,Slava,S-300F Fort,1,0.0,340.0,0,sam_intercept,3
+1155,19:15,USS Ticonderoga,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+1181,19:41,USS Arleigh Burke,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+1200,20:00,USS Nimitz,Slava,Air Strike,1,92.8,247.2,0,air_strike,3
+1207,20:07,USS Spruance,Kirov,S-300F Fort,1,0.0,450.0,0,sam_intercept,3
+1260,21:00,USS Nimitz,Slava,Air Strike,1,123.4,123.9,0,air_strike,2
+1266,21:06,Akula,USS Arleigh Burke,SM-2MR Standard,1,0.0,290.0,0,sam_intercept,2
+1320,22:00,USS Nimitz,Slava,Air Strike,1,121.8,2.0,0,air_strike,2
+1380,23:00,USS Nimitz,Slava,Air Strike,1,115.9,0.0,1,air_strike,2
+1703,28:23,USS Ticonderoga,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+1740,29:00,USS Nimitz,Kirov,Air Strike,1,144.4,305.6,0,air_strike,2
+1743,29:03,USS Virginia,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+1763,29:23,USS Arleigh Burke,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+1776,29:36,USS Virginia,Udaloy,AK-630,1,0.0,225.0,0,ciws_intercept,2
+1800,30:00,USS Nimitz,Kirov,Air Strike,1,120.3,185.3,0,air_strike,2
+1808,30:08,USS Spruance,Udaloy,AK-630,1,0.0,225.0,0,ciws_intercept,2
+1860,31:00,USS Nimitz,Kirov,Air Strike,1,127.7,57.6,0,air_strike,2
+1883,31:23,USS Spruance,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+1892,31:32,USS Spruance,Udaloy,AK-630,1,0.0,225.0,0,ciws_intercept,2
+1920,32:00,USS Nimitz,Kirov,Air Strike,1,89.2,0.0,1,air_strike,2
+1923,32:03,USS Los Angeles,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+1943,32:23,USS Ticonderoga,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+1963,32:43,USS Arleigh Burke,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+1979,32:59,USS Spruance,Udaloy,AK-630,1,0.0,225.0,0,ciws_intercept,2
+2043,34:03,USS Spruance,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2064,34:24,USS Spruance,Udaloy,AK-630,1,0.0,225.0,0,ciws_intercept,2
+2149,35:49,USS Spruance,Udaloy,AK-630,1,0.0,225.0,0,ciws_intercept,2
+2164,36:04,USS Los Angeles,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2235,37:15,USS Spruance,Udaloy,AK-630,1,0.0,225.0,0,ciws_intercept,2
+2267,37:47,USS Arleigh Burke,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2280,38:00,USS Nimitz,Tarantul III,Air Strike,1,183.8,0.0,1,air_strike,2
+2313,38:33,USS Spruance,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2344,39:04,USS Ticonderoga,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2384,39:44,USS Arleigh Burke,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2424,40:24,USS Spruance,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2444,40:44,USS Ticonderoga,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2464,41:04,USS Arleigh Burke,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2484,41:24,USS Spruance,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2516,41:56,USS Ticonderoga,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2536,42:16,USS Arleigh Burke,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2596,43:16,USS Spruance,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2616,43:36,USS Ticonderoga,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2636,43:56,USS Arleigh Burke,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2640,44:00,USS Nimitz,Udaloy,Air Strike,1,177.8,47.2,0,air_strike,2
+2676,44:36,USS Spruance,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,2
+2700,45:00,USS Nimitz,Udaloy,Air Strike,1,149.8,0.0,1,air_strike,2
+2756,45:56,USS Ticonderoga,Sovremenny,Shtil,1,0.0,240.0,0,sam_intercept,1
+2825,47:05,USS Spruance,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+2871,47:51,USS Arleigh Burke,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+2912,48:32,USS Spruance,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+2980,49:40,USS Ticonderoga,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+3003,50:03,USS Arleigh Burke,Nanuchka III,Osa-M,1,0.0,95.0,0,sam_intercept,1
+3016,50:16,USS Spruance,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+3052,50:52,USS Ticonderoga,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+3070,51:10,USS Arleigh Burke,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+3104,51:44,USS Spruance,Nanuchka III,Osa-M,1,0.0,95.0,0,sam_intercept,1
+3118,51:58,USS Ticonderoga,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+3154,52:34,USS Arleigh Burke,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+3224,53:44,USS Ticonderoga,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+3267,54:27,USS Arleigh Burke,Slava,Tomahawk BGM-109,0,0.0,-1.0,0,miss,1
+3359,55:59,USS Ticonderoga,Slava,Tomahawk BGM-109,0,0.0,-1.0,0,miss,1
+3359,55:59,USS Arleigh Burke,Slava,Tomahawk BGM-109,0,0.0,-1.0,0,miss,1
+3450,57:30,USS Arleigh Burke,Slava,Tomahawk BGM-109,0,0.0,-1.0,0,miss,1
+3451,57:31,USS Ticonderoga,Slava,Tomahawk BGM-109,0,0.0,-1.0,0,miss,1
+3475,57:55,USS Independence,Krivak II,Osa-M,1,0.0,190.0,0,sam_intercept,1
+3542,59:02,USS Ticonderoga,Slava,Tomahawk BGM-109,0,0.0,-1.0,0,miss,1
+3542,59:02,USS Arleigh Burke,Slava,Tomahawk BGM-109,0,0.0,-1.0,0,miss,1
+3571,59:31,USS Spruance,Nanuchka III,Osa-M,1,0.0,95.0,0,sam_intercept,1
+3589,59:49,USS Independence,Nanuchka III,Osa-M,1,0.0,95.0,0,sam_intercept,1

@@ -1,22 +1,31 @@
 /*
- * NAVSIM - Cold War Naval Tactical Engagement Simulator v3.0
+ * NAVSIM - Cold War Naval Tactical Engagement Simulator v4.0
  * ===========================================================
  * Atlantic Pole of Inaccessibility scenario: 24.1851°N 43.3704°W
  * Deep open-ocean, no land within 2033 km. No land-based aviation.
  *
- * New in v3.0:
+ * New in v4.0:
+ *   - Air-to-air combat: CAP sorties intercept enemy STRIKE sorties
+ *   - Helicopter sorties: SH-60 Seahawk ASW from surface combatants
+ *   - C4ISR / Link-16 / CEC: NATO shared detection picture
+ *   - HARM anti-radiation missiles: home on active radar emitters
+ *   - Frequency hopping: jammed radars can switch bands
+ *   - Communications jamming: PACT ECM degrades Link-16
+ *   - Full ncurses TUI with tactical map, event log, ship panels
+ *
+ * Retained from v3.0:
  *   - Aircraft carrier air wings with CAP/STRIKE/ASW/AEW sorties
- *   - Layered air defense: long-range SAM → point SAM → CIWS
- *   - CIWS actually intercepts incoming missiles (with barrel wear)
+ *   - Layered air defense: long-range SAM -> point SAM -> CIWS
+ *   - CIWS intercept with barrel wear
  *   - Chaff/flares deployed against incoming missiles
  *   - Proper submarine warfare: sonar detection only, no radar
  *   - Sonar systems: passive/active/towed array per ship class
  *   - Torpedo decoys (Nixie)
- *   - Compartment damage actually degrades ship systems
+ *   - Compartment damage degrades ship systems
  *   - Fire spreading between compartments
- *   - Progressive flooding → capsizing
+ *   - Progressive flooding -> capsizing
  *   - Weather system (Beaufort 0-6) affecting sensors and ASW
- *   - All ship/weapon stats loaded from data/platforms.csv and data/weapons.csv
+ *   - All ship/weapon stats from data/platforms.csv and data/weapons.csv
  *
  * (C) 2026 - PUBLIC DOMAIN / GPL-3.0 Compatible
  */
@@ -28,6 +37,7 @@
 #include <math.h>
 #include <time.h>
 #include <stdint.h>
+#include <locale.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -36,25 +46,14 @@
 #include <direct.h>
 #endif
 
+/* ncurses */
+#define NCURSES_WIDECHAR 1
+#include <ncurses.h>
+#include <panel.h>
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-
-/* ── Windows Console Setup ───────────────────────────────── */
-static void setup_console(void) {
-#ifdef _WIN32
-    SetConsoleOutputCP(65001);
-    SetConsoleCP(65001);
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hOut != INVALID_HANDLE_VALUE) {
-        DWORD mode = 0;
-        if (GetConsoleMode(hOut, &mode)) {
-            mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-            SetConsoleMode(hOut, mode);
-        }
-    }
-#endif
-}
 
 /* ── Configuration ───────────────────────────────────────── */
 #define MAX_SHIPS         32
@@ -66,6 +65,7 @@ static void setup_console(void) {
 #define MAX_COMPARTMENTS  12
 #define MAX_SORTIES       16   /* per carrier */
 #define MAX_WPN_TEMPLATES 64
+#define MAX_EVENTS       512   /* rolling event log for TUI */
 #define LOG_FILE    "battle_log.csv"
 
 /* ── RNG (xoshiro128**) ──────────────────────────────────── */
@@ -105,7 +105,7 @@ typedef enum {
 typedef enum {
     WPN_SSM, WPN_SAM, WPN_TORPEDO, WPN_GUN_5IN,
     WPN_GUN_130MM, WPN_GUN_76MM, WPN_GUN_ADVANCED,
-    WPN_RAILGUN, WPN_CIWS, WPN_CRUISE_MISSILE, WPN_ASROC
+    WPN_RAILGUN, WPN_CIWS, WPN_CRUISE_MISSILE, WPN_ASROC, WPN_HARM
 } WeaponType;
 typedef enum { RADAR_S_BAND, RADAR_X_BAND, RADAR_L_BAND, RADAR_C_BAND } RadarBand;
 typedef enum {
@@ -113,11 +113,12 @@ typedef enum {
     COMP_MIDSHIP_STBD, COMP_ENGINE, COMP_AFT_WEAPONS, COMP_STERN,
     COMP_RADAR, COMP_COMMS, COMP_MAGAZINE, COMP_KEEL
 } Compartment;
-typedef enum { SORTIE_CAP, SORTIE_STRIKE, SORTIE_ASW, SORTIE_AEW } SortieType;
+typedef enum { SORTIE_CAP, SORTIE_STRIKE, SORTIE_ASW, SORTIE_AEW, SORTIE_HELO_ASW } SortieType;
 typedef enum {
     EVT_HIT, EVT_MISS, EVT_CIWS_INTERCEPT, EVT_SAM_INTERCEPT,
     EVT_CHAFF_SEDUCE, EVT_AIR_STRIKE, EVT_ASW_ATTACK,
-    EVT_TORPEDO_DECOY, EVT_CAPSIZE
+    EVT_TORPEDO_DECOY, EVT_CAPSIZE, EVT_AIR_TO_AIR, EVT_HARM_STRIKE,
+    EVT_LINK16_SHARE, EVT_COMMS_JAM
 } EventType;
 
 /* ── Data Structures ─────────────────────────────────────── */
@@ -126,8 +127,10 @@ typedef struct {
     SortieType type;
     int        launch_tick;
     int        return_tick;
-    int        target_ship_idx; /* -1 = no specific target */
-    int        effect_applied;  /* 1 = mid-mission effect has fired */
+    int        target_ship_idx;
+    int        effect_applied;
+    double     x, y;          /* sortie position for map display */
+    int        destroyed;     /* shot down by CAP */
 } AircraftSortie;
 
 typedef struct {
@@ -144,17 +147,21 @@ typedef struct {
     double     gain_db;
     double     frequency_ghz;
     double     range_nm;
+    double     base_range_nm;    /* original range for freq hop restore */
     double     azimuth_res;
     int        jammed;
     double     jam_strength;
+    int        freq_hop_capable; /* can switch bands when jammed */
+    int        freq_hop_cooldown;
+    int        emitting;         /* actively radiating (HARM target) */
 } RadarSystem;
 
 typedef struct {
     Compartment type;
-    double      integrity;   /* 0.0-1.0 */
+    double      integrity;
     int         flooding;
     int         on_fire;
-    double      flood_rate;  /* m³/min */
+    double      flood_rate;
 } DamageCompartment;
 
 typedef struct {
@@ -171,18 +178,16 @@ typedef struct {
     double     projectile_mass_kg;
     double     elevation_angle;
     double     guidance_quality;
-    /* Classification flags */
     int        is_ciws;
     int        is_sam;
     int        is_anti_sub;
     int        is_anti_air;
-    int        is_sea_skimmer_capable; /* can engage sea-skimmers */
-    /* CIWS hardware state */
+    int        is_sea_skimmer_capable;
+    int        is_harm;          /* anti-radiation missile */
     int        rounds_fired_total;
     int        overheated;
     int        overheat_cooldown;
-    int        magazine_limit;       /* physical max before wear degrades */
-    /* Mount position: 0=bow 1=amidships 2=stern */
+    int        magazine_limit;
     int        mount_position;
 } Weapon;
 
@@ -195,12 +200,13 @@ typedef struct {
     double     heading;
     double     speed_kts;
     double     max_speed_kts;
-    double     base_max_speed_kts; /* original, for damage reference */
+    double     base_max_speed_kts;
     double     hp, max_hp;
     double     armor;
     double     rcs;
     int        detected;
-    int        is_submerged;       /* submarines always 1 */
+    int        detected_by_link16; /* detected via data link, not own sensors */
+    int        is_submerged;
 
     RadarSystem  search_radar;
     RadarSystem  fire_control_radar;
@@ -212,15 +218,19 @@ typedef struct {
     int        flare_charges;
     int        nixie_charges;
 
+    /* C4ISR */
+    int        has_link16;        /* NATO data link */
+    int        link16_degraded;   /* comms jamming effect */
+    double     link16_quality;    /* 0-1, 1=perfect sharing */
+
     DamageCompartment compartments[MAX_COMPARTMENTS];
     int        crew_casualties;
-    double     flooding_total;     /* cumulative tons ingress */
+    double     flooding_total;
     double     list_angle;
     int        speed_reduced;
 
-    /* Derived damage-effect state */
-    double     radar_effectiveness;     /* 0-1, applied to radar ranges */
-    double     targeting_effectiveness; /* 0-1, applied to p_hit */
+    double     radar_effectiveness;
+    double     targeting_effectiveness;
     int        fwd_weapons_disabled;
     int        aft_weapons_disabled;
 
@@ -231,8 +241,14 @@ typedef struct {
     int        max_sorties;
     int        sorties_available;
     int        sorties_in_flight;
-    int        stobar;             /* 1 = ski-jump; no catapult */
+    int        stobar;
     AircraftSortie sorties[MAX_SORTIES];
+
+    /* Helicopter capability (non-carrier surface ships) */
+    int        helo_capacity;     /* number of embarked helicopters */
+    int        helos_available;
+    int        helos_in_flight;
+    AircraftSortie helo_sorties[4]; /* max 4 helo slots */
 
     int        alive;
     int        kills;
@@ -252,9 +268,11 @@ typedef struct {
     double     drag_coeff;
     double     damage;
     WeaponType type;
-    int        is_missile;     /* SSM / cruise / air-launched */
+    int        is_missile;
     int        is_torpedo;
-    int        is_sea_skimmer; /* flies very low; harder for CIWS */
+    int        is_sea_skimmer;
+    int        is_harm;         /* homes on radar emitters */
+    int        harm_target_idx; /* ship index of emitter */
     int        intercepted;
 } Projectile;
 
@@ -271,7 +289,6 @@ typedef struct {
     int       sea_state;
 } EngagementRecord;
 
-/* Weapon template loaded from CSV */
 typedef struct {
     char       name[MAX_NAME];
     WeaponType type;
@@ -290,6 +307,7 @@ typedef struct {
     int        is_sam;
     int        is_anti_sub;
     int        is_sea_skimmer;
+    int        is_harm;
     int        magazine_limit;
     int        mount_position;
 } WeaponTemplate;
@@ -310,6 +328,17 @@ static EngagementRecord records[16384];
 static int           num_records = 0;
 static WeaponTemplate wpn_templates[MAX_WPN_TEMPLATES];
 static int           num_wpn_templates = 0;
+static uint32_t      g_seed = 0;
+
+/* Rolling event log for TUI */
+typedef struct {
+    int  tick;
+    char text[160];
+    int  color_pair; /* ncurses color pair */
+} EventLogEntry;
+static EventLogEntry event_log[MAX_EVENTS];
+static int           event_log_head = 0;
+static int           event_log_count = 0;
 
 /* Statistics */
 static int stat_launches[2];
@@ -326,14 +355,20 @@ static int stat_torpedo_decoys[2];
 static int stat_air_strikes[2];
 static int stat_asw_attacks[2];
 static int stat_capsized[2];
+static int stat_a2a_kills[2];
+static int stat_harm_hits[2];
+static int stat_link16_shares[2];
+static int stat_comms_jammed[2];
+static int stat_freq_hops[2];
+static int stat_helo_asw[2];
 
 /* Weather */
-static int    sea_state = 1;          /* Beaufort 0-6 */
+static int    sea_state = 1;
 static int    sea_state_timer = 600;
-static double wx_radar   = 1.0;       /* radar effectiveness */
-static double wx_small   = 1.0;       /* small ship sensor penalty */
-static double wx_asw_helo = 1.0;      /* ASW helo effectiveness */
-static double wx_ir      = 1.0;       /* IR/optical */
+static double wx_radar   = 1.0;
+static double wx_small   = 1.0;
+static double wx_asw_helo = 1.0;
+static double wx_ir      = 1.0;
 
 static const char *beaufort_names[] = {
     "Calm","Light Air","Light Breeze","Gentle Breeze",
@@ -343,18 +378,56 @@ static const char *beaufort_names[] = {
 /* Physics constants */
 #define AIR_DENSITY_SL  1.225
 #define GRAVITY         9.81
-#define SEA_WATER_DENSITY 1025.0  /* kg/m³ */
+#define SEA_WATER_DENSITY 1025.0
 
-/* ── ANSI ────────────────────────────────────────────────── */
-#define ANSI_RESET   "\033[0m"
-#define ANSI_GREEN   "\033[32m"
-#define ANSI_RED     "\033[31m"
-#define ANSI_YELLOW  "\033[33m"
-#define ANSI_CYAN    "\033[36m"
-#define ANSI_BLUE    "\033[34m"
-#define ANSI_MAGENTA "\033[35m"
-#define ANSI_BOLD    "\033[1m"
-#define ANSI_DIM     "\033[2m"
+/* ── TUI globals ─────────────────────────────────────────── */
+static WINDOW *win_map = NULL;
+static WINDOW *win_log = NULL;
+static WINDOW *win_nato = NULL;
+static WINDOW *win_pact = NULL;
+static WINDOW *win_stats = NULL;
+static WINDOW *win_header = NULL;
+static PANEL  *pan_map = NULL;
+static PANEL  *pan_log = NULL;
+static PANEL  *pan_nato = NULL;
+static PANEL  *pan_pact = NULL;
+static PANEL  *pan_stats = NULL;
+static PANEL  *pan_header = NULL;
+
+/* Color pairs */
+#define CP_NORMAL    0
+#define CP_NATO      1
+#define CP_PACT      2
+#define CP_HEADER    3
+#define CP_ALERT     4
+#define CP_DIM       5
+#define CP_CYAN      6
+#define CP_MAGENTA   7
+#define CP_YELLOW    8
+#define CP_WHITE     9
+#define CP_MAP_BG   10
+#define CP_MAP_NATO 11
+#define CP_MAP_PACT 12
+#define CP_MAP_DEAD 13
+#define CP_MAP_PROJ 14
+#define CP_MAP_AIR  15
+#define CP_BORDER   16
+
+/* ── Event Log Helper ────────────────────────────────────── */
+static void evt_log(int tick, int cpair, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int idx = (event_log_head + event_log_count) % MAX_EVENTS;
+    if (event_log_count >= MAX_EVENTS) {
+        event_log_head = (event_log_head + 1) % MAX_EVENTS;
+    } else {
+        event_log_count++;
+    }
+    event_log[idx].tick = tick;
+    event_log[idx].color_pair = cpair;
+    vsnprintf(event_log[idx].text, sizeof(event_log[idx].text), fmt, ap);
+    va_end(ap);
+}
 
 /* ── CSV Helpers ─────────────────────────────────────────── */
 static char *csv_trim(char *s) {
@@ -374,6 +447,7 @@ static WeaponType parse_wpn_type(const char *s) {
     if (!strcmp(s,"CIWS"))    return WPN_CIWS;
     if (!strcmp(s,"CRUISE"))  return WPN_CRUISE_MISSILE;
     if (!strcmp(s,"ASROC"))   return WPN_ASROC;
+    if (!strcmp(s,"HARM"))    return WPN_HARM;
     return WPN_SSM;
 }
 
@@ -400,27 +474,24 @@ static ShipClass parse_ship_class(const char *s) {
 /* ── Weapons CSV Loader ──────────────────────────────────── */
 static void load_weapons_csv(const char *path) {
     FILE *f = fopen(path, "r");
-    if (!f) { fprintf(stderr, "[WARN] Cannot open %s; weapons must be in platforms.csv inline\n", path); return; }
+    if (!f) { fprintf(stderr, "[WARN] Cannot open %s\n", path); return; }
 
     char line[512];
     int  header_done = 0;
-    /* Column indices — matched by header name */
     int cName=-1,cType=-1,cRange=-1,cPHit=-1,cDmg=-1,cSalvo=-1,cReload=-1,cAmmo=-1;
     int cMV=-1,cMass=-1,cElev=-1,cGuid=-1;
-    int cAA=-1,cCIWS=-1,cSAM=-1,cAS=-1,cSkim=-1,cMag=-1,cMount=-1;
+    int cAA=-1,cCIWS=-1,cSAM=-1,cAS=-1,cSkim=-1,cMag=-1,cMount=-1,cHARM=-1;
 
     while (fgets(line, sizeof(line), f)) {
         char *p = csv_trim(line);
         if (!*p || *p == '#') continue;
 
-        /* Build token array */
         char *toks[32]; int ntoks = 0;
         char tmp[512]; strncpy(tmp, p, 511); tmp[511]='\0';
         char *tok = strtok(tmp, ",");
         while (tok && ntoks < 32) { toks[ntoks++] = csv_trim(tok); tok = strtok(NULL, ","); }
 
         if (!header_done) {
-            /* Map header names to column indices */
             for (int i = 0; i < ntoks; i++) {
                 if (!strcmp(toks[i],"Name"))            cName=i;
                 else if (!strcmp(toks[i],"Type"))       cType=i;
@@ -439,6 +510,7 @@ static void load_weapons_csv(const char *path) {
                 else if (!strcmp(toks[i],"IsSAM"))      cSAM=i;
                 else if (!strcmp(toks[i],"IsAntiSub"))  cAS=i;
                 else if (!strcmp(toks[i],"IsSeaSkimmer")) cSkim=i;
+                else if (!strcmp(toks[i],"IsHARM"))     cHARM=i;
                 else if (!strcmp(toks[i],"MagazineLimit")) cMag=i;
                 else if (!strcmp(toks[i],"MountPosition")) cMount=i;
             }
@@ -467,14 +539,13 @@ static void load_weapons_csv(const char *path) {
         w->is_sam           = (cSAM>=0&&cSAM<ntoks)    ? atoi(toks[cSAM])              : 0;
         w->is_anti_sub      = (cAS>=0&&cAS<ntoks)       ? atoi(toks[cAS])              : 0;
         w->is_sea_skimmer   = (cSkim>=0&&cSkim<ntoks)  ? atoi(toks[cSkim])             : 0;
+        w->is_harm          = (cHARM>=0&&cHARM<ntoks)  ? atoi(toks[cHARM])             : 0;
         w->magazine_limit   = (cMag>=0&&cMag<ntoks)    ? atoi(toks[cMag])              : w->ammo;
         w->mount_position   = (cMount>=0&&cMount<ntoks)? atoi(toks[cMount])            : 1;
     }
     fclose(f);
-    printf("  [DATA] Loaded %d weapon templates from %s\n", num_wpn_templates, path);
 }
 
-/* Find weapon template by name */
 static WeaponTemplate *find_weapon(const char *name) {
     for (int i = 0; i < num_wpn_templates; i++)
         if (!strcmp(wpn_templates[i].name, name)) return &wpn_templates[i];
@@ -485,8 +556,10 @@ static WeaponTemplate *find_weapon(const char *name) {
 static void init_radar(RadarSystem *r, RadarBand band, double power,
                        double gain, double freq, double range) {
     r->band = band; r->power_kw = power; r->gain_db = gain;
-    r->frequency_ghz = freq; r->range_nm = range;
+    r->frequency_ghz = freq; r->range_nm = range; r->base_range_nm = range;
     r->azimuth_res = 1.0; r->jammed = 0; r->jam_strength = 0;
+    r->freq_hop_capable = 0; r->freq_hop_cooldown = 0;
+    r->emitting = 1; /* radars emit by default */
 }
 
 static void add_weapon_from_template(Ship *s, const char *wname) {
@@ -512,7 +585,8 @@ static void add_weapon_from_template(Ship *s, const char *wname) {
     w->is_sam               = t->is_sam;
     w->is_anti_sub          = t->is_anti_sub;
     w->is_anti_air          = t->is_anti_air;
-    w->is_sea_skimmer_capable = t->is_ciws || t->is_sam; /* CIWS/SAM can engage skimmers */
+    w->is_sea_skimmer_capable = t->is_ciws || t->is_sam;
+    w->is_harm              = t->is_harm;
     w->magazine_limit       = t->magazine_limit > 0 ? t->magazine_limit : t->ammo;
     w->mount_position       = t->mount_position;
     w->cooldown             = 0;
@@ -541,7 +615,7 @@ static Ship *add_ship_base(Side side, const char *name, const char *hull,
     s->radar_effectiveness = 1.0;
     s->targeting_effectiveness = 1.0;
     s->esm_sensitivity = 0.5;
-    /* init compartments */
+    s->link16_quality = 1.0;
     for (int i = 0; i < MAX_COMPARTMENTS; i++) {
         s->compartments[i].type = i;
         s->compartments[i].integrity = 1.0;
@@ -552,7 +626,7 @@ static Ship *add_ship_base(Side side, const char *name, const char *hull,
 /* ── Platforms CSV Loader ────────────────────────────────── */
 static void load_platforms_csv(const char *path) {
     FILE *f = fopen(path, "r");
-    if (!f) { fprintf(stderr,"[WARN] Cannot open %s; falling back to hardcoded scenario\n", path); return; }
+    if (!f) { fprintf(stderr,"[WARN] Cannot open %s\n", path); return; }
 
     char line[1024];
     int  hdr = 0;
@@ -563,6 +637,7 @@ static void load_platforms_csv(const char *path) {
     int cECM=-1,cESM=-1,cChaff=-1,cFlare=-1,cNixie=-1;
     int cSPas=-1,cSAct=-1,cTArr=-1,cTRng=-1;
     int cMaxS=-1,cSTOBAR=-1;
+    int cHelo=-1, cFreqHop=-1, cLink16=-1;
     int cW[8]; for(int i=0;i<8;i++) cW[i]=-1;
 
     while (fgets(line, sizeof(line), f)) {
@@ -609,6 +684,9 @@ static void load_platforms_csv(const char *path) {
                 else if (!strcmp(t,"TowedArrayRange"))   cTRng=i;
                 else if (!strcmp(t,"MaxSorties"))   cMaxS=i;
                 else if (!strcmp(t,"STOBAR"))       cSTOBAR=i;
+                else if (!strcmp(t,"HeloCapacity")) cHelo=i;
+                else if (!strcmp(t,"FreqHop"))      cFreqHop=i;
+                else if (!strcmp(t,"Link16"))       cLink16=i;
                 else if (!strcmp(t,"Weapon1"))      cW[0]=i;
                 else if (!strcmp(t,"Weapon2"))      cW[1]=i;
                 else if (!strcmp(t,"Weapon3"))      cW[2]=i;
@@ -638,12 +716,11 @@ static void load_platforms_csv(const char *path) {
         Ship *s = add_ship_base(side, toks[cName], hull, cls, hp, armor, spd, rcs);
         if (!s) continue;
 
-        /* Position — add small random jitter */
+        /* Position */
         double bx = (cSX>=0&&cSX<ntoks) ? atof(toks[cSX]) : 150;
         double by = (cSY>=0&&cSY<ntoks) ? atof(toks[cSY]) : 150;
         s->x = bx + rng_gauss(0, 8);
         s->y = by + rng_gauss(0, 8);
-        /* Clamp to grid */
         if (s->x < 5)  s->x = 5;  if (s->x > 295) s->x = 295;
         if (s->y < 5)  s->y = 5;  if (s->y > 295) s->y = 295;
         s->heading = (cSHdg>=0&&cSHdg<ntoks) ? atof(toks[cSHdg]) : 0;
@@ -663,6 +740,14 @@ static void load_platforms_csv(const char *path) {
         double fr=(cFRng>=0&&cFRng<ntoks)?atof(toks[cFRng]):60;
         init_radar(&s->fire_control_radar, fb, fp, fg, ff, fr);
 
+        /* Frequency hopping capability */
+        int fhop = (cFreqHop>=0&&cFreqHop<ntoks) ? atoi(toks[cFreqHop]) : 0;
+        s->search_radar.freq_hop_capable = fhop;
+        s->fire_control_radar.freq_hop_capable = fhop;
+
+        /* Link-16 */
+        s->has_link16 = (cLink16>=0&&cLink16<ntoks) ? atoi(toks[cLink16]) : (side == SIDE_NATO ? 1 : 0);
+
         /* ECM/ESM */
         s->ecm_power_kw    = (cECM>=0&&cECM<ntoks)  ? atof(toks[cECM])  : 0;
         s->esm_sensitivity = (cESM>=0&&cESM<ntoks)  ? atof(toks[cESM])  : 0.5;
@@ -681,6 +766,16 @@ static void load_platforms_csv(const char *path) {
         s->sorties_available= s->max_sorties;
         s->stobar           = (cSTOBAR>=0&&cSTOBAR<ntoks)?atoi(toks[cSTOBAR]):0;
 
+        /* Helicopters */
+        s->helo_capacity = (cHelo>=0&&cHelo<ntoks) ? atoi(toks[cHelo]) : 0;
+        /* Auto-assign helos for ships that historically carry them */
+        if (s->helo_capacity == 0 && s->max_sorties == 0 && cls != CLASS_SUBMARINE &&
+            cls != CLASS_MISSILE_BOAT && cls != CLASS_CORVETTE) {
+            if (cls == CLASS_DESTROYER || cls == CLASS_CRUISER) s->helo_capacity = 2;
+            else if (cls == CLASS_FRIGATE) s->helo_capacity = 1;
+        }
+        s->helos_available = s->helo_capacity;
+
         /* Weapons */
         for (int wi = 0; wi < 8; wi++) {
             if (cW[wi]>=0&&cW[wi]<ntoks&&*toks[cW[wi]])
@@ -688,14 +783,13 @@ static void load_platforms_csv(const char *path) {
         }
     }
     fclose(f);
-    printf("  [DATA] Loaded %d platforms from %s\n", num_ships, path);
 }
 
 /* ── Weather ─────────────────────────────────────────────── */
 static void update_weather_factors(void) {
-    wx_radar    = 1.0 - sea_state * 0.035;   /* up to -21% at SS6 */
+    wx_radar    = 1.0 - sea_state * 0.035;
     wx_small    = 1.0 - (sea_state > 3 ? (sea_state-3)*0.10 : 0.0);
-    wx_asw_helo = 1.0 - sea_state * 0.12;    /* up to -72% at SS6 */
+    wx_asw_helo = 1.0 - sea_state * 0.12;
     wx_ir       = 1.0 - sea_state * 0.07;
     if (wx_radar    < 0.4) wx_radar    = 0.4;
     if (wx_small    < 0.5) wx_small    = 0.5;
@@ -713,8 +807,8 @@ static void phase_weather(int tick) {
         sea_state_timer = 300 + (int)(rng_uniform() * 600);
         update_weather_factors();
         if (abs(sea_state - old) >= 2)
-            printf("  " ANSI_CYAN "[WEATHER]" ANSI_RESET " Sea state %d → %d (%s)\n",
-                   old, sea_state, beaufort_names[sea_state]);
+            evt_log(tick, CP_CYAN, "[WEATHER] Sea state %d > %d (%s)",
+                    old, sea_state, beaufort_names[sea_state]);
     }
 }
 
@@ -736,7 +830,7 @@ static const char *class_str(ShipClass c) {
     const char *n[]={"CV","CG","DD","FF","FFL","SS","PGG","LPD"}; return n[c];
 }
 static const char *sortie_str(SortieType t) {
-    const char *n[]={"CAP","STRIKE","ASW","AEW"}; return n[t];
+    const char *n[]={"CAP","STRIKE","ASW","AEW","HELO-ASW"}; return n[t];
 }
 
 static void log_event(int tick, const char *atk, const char *def,
@@ -768,9 +862,10 @@ static void init_projectile(Projectile *p, Ship *attacker, Ship *target,
     p->damage  = wpn->damage;
     p->type    = wpn->type;
     p->drag_coeff = 0.3;
-    p->is_missile = (wpn->type == WPN_SSM || wpn->type == WPN_CRUISE_MISSILE);
+    p->is_missile = (wpn->type == WPN_SSM || wpn->type == WPN_CRUISE_MISSILE || wpn->type == WPN_HARM);
     p->is_torpedo = (wpn->type == WPN_TORPEDO || wpn->type == WPN_ASROC);
-    /* Sea-skimming missiles: P-700/P-500/P-270/P-120 */
+    p->is_harm = wpn->is_harm;
+    p->harm_target_idx = -1;
     p->is_sea_skimmer = (wpn->type == WPN_SSM &&
                          (strstr(wpn->name,"Moskit") || strstr(wpn->name,"Bazalt") ||
                           strstr(wpn->name,"Granit") || strstr(wpn->name,"Malakhit") ||
@@ -778,29 +873,31 @@ static void init_projectile(Projectile *p, Ship *attacker, Ship *target,
 
     double v0 = wpn->muzzle_velocity_mps;
 
-    if (wpn->type == WPN_SSM || wpn->type == WPN_CRUISE_MISSILE) {
+    if (wpn->type == WPN_SSM || wpn->type == WPN_CRUISE_MISSILE || wpn->type == WPN_HARM) {
         double dx = target->x - attacker->x;
         double dy = target->y - attacker->y;
         double d  = sqrt(dx*dx + dy*dy);
         if (d < 0.001) d = 0.001;
-        v0 *= 340.0; /* mach to m/s */
+        v0 *= 340.0;
         p->vx = (dx/d) * v0 / 1852.0;
         p->vy = (dy/d) * v0 / 1852.0;
         p->vz = 0;
-        p->z  = p->is_sea_skimmer ? 15.0 : 50.0; /* sea-skimmers fly low */
+        p->z  = p->is_sea_skimmer ? 15.0 : 50.0;
+        if (p->is_harm) {
+            p->z = 200.0; /* HARM flies high initially */
+            p->harm_target_idx = (int)(target - ships);
+        }
     } else if (wpn->type == WPN_TORPEDO || wpn->type == WPN_ASROC) {
         double dx = target->x - attacker->x;
         double dy = target->y - attacker->y;
         double d  = sqrt(dx*dx + dy*dy);
         if (d < 0.001) d = 0.001;
-        /* torpedo speed in NM/s (45 kts ≈ 0.0125 NM/s) */
-        double tspd = v0 / 3600.0; /* knots to NM/s */
+        double tspd = v0 / 3600.0;
         p->vx = (dx/d) * tspd;
         p->vy = (dy/d) * tspd;
         p->vz = 0;
-        p->z  = -200.0; /* start underwater */
+        p->z  = -200.0;
     } else {
-        /* Gun: ballistic arc */
         double angle_rad = wpn->elevation_angle * M_PI / 180.0;
         double bearing   = bearing_deg(attacker, target) * M_PI / 180.0;
         double v_horiz = v0 * cos(angle_rad);
@@ -813,7 +910,6 @@ static void init_projectile(Projectile *p, Ship *attacker, Ship *target,
 static void update_projectile_physics(Projectile *p, double dt) {
     if (!p->active) return;
 
-    /* Torpedoes: hydrodynamic drag, no gravity, stay underwater */
     if (p->is_torpedo) {
         double vxy = sqrt(p->vx*p->vx + p->vy*p->vy);
         double drag = 0.3 * SEA_WATER_DENSITY * 0.04 * vxy * vxy * (1852.0*1852.0) / (p->mass_kg * 1852.0);
@@ -822,18 +918,32 @@ static void update_projectile_physics(Projectile *p, double dt) {
             p->vy -= (p->vy/vxy)*drag*dt;
         }
         p->x += p->vx*dt; p->y += p->vy*dt;
-        return; /* no z physics for torpedoes */
+        return;
     }
 
-    /* Missiles and shells */
-    if (p->type != WPN_SSM && p->type != WPN_CRUISE_MISSILE)
+    /* HARM: re-target toward emitter if it's still radiating */
+    if (p->is_harm && p->harm_target_idx >= 0 && p->harm_target_idx < num_ships) {
+        Ship *tgt = &ships[p->harm_target_idx];
+        if (tgt->alive && tgt->search_radar.emitting) {
+            double dx = tgt->x - p->x;
+            double dy = tgt->y - p->y;
+            double d = sqrt(dx*dx + dy*dy);
+            if (d > 0.01) {
+                double spd = sqrt(p->vx*p->vx + p->vy*p->vy);
+                p->vx = (dx/d) * spd;
+                p->vy = (dy/d) * spd;
+            }
+        }
+    }
+
+    if (p->type != WPN_SSM && p->type != WPN_CRUISE_MISSILE && p->type != WPN_HARM)
         p->vz -= GRAVITY * 3.28084 * dt;
 
     double vtot = sqrt((p->vx*1852.0)*(p->vx*1852.0) +
                        (p->vy*1852.0)*(p->vy*1852.0) +
                        (p->vz*0.3048)*(p->vz*0.3048));
     double ref_area, drag_mult;
-    if (p->type == WPN_CRUISE_MISSILE) { ref_area=0.2; drag_mult=0.02; }
+    if (p->type == WPN_CRUISE_MISSILE || p->type == WPN_HARM) { ref_area=0.2; drag_mult=0.02; }
     else if (p->type == WPN_SSM)       { ref_area=0.2; drag_mult=0.10; }
     else                               { ref_area=0.01; drag_mult=1.0; }
 
@@ -847,18 +957,106 @@ static void update_projectile_physics(Projectile *p, double dt) {
 
     p->x += p->vx*dt; p->y += p->vy*dt; p->z += p->vz*dt;
 
-    if (p->z <= 0 && !p->is_missile) p->active = 0; /* shell hit water */
+    if (p->z <= 0 && !p->is_missile) p->active = 0;
     if (p->x<-50||p->x>GRID_SIZE+50||p->y<-50||p->y>GRID_SIZE+50) p->active=0;
 }
 
-/* ── Detection Phase (radar — surface targets only) ─────── */
+/* ── C4ISR / Link-16 Phase ──────────────────────────────── */
+static void phase_c4isr(int tick) {
+    /* NATO Link-16 / CEC: share detections fleet-wide */
+    /* First, collect all contacts detected by any NATO ship */
+    int nato_detected[MAX_SHIPS];
+    memset(nato_detected, 0, sizeof(nato_detected));
+
+    for (int i = 0; i < num_ships; i++) {
+        if (!ships[i].alive || ships[i].side != SIDE_NATO) continue;
+        if (!ships[i].has_link16) continue;
+
+        for (int j = 0; j < num_ships; j++) {
+            if (ships[j].side == SIDE_NATO) continue;
+            if (ships[j].detected) nato_detected[j] = 1;
+        }
+    }
+
+    /* PACT communications jamming degrades Link-16 */
+    double link16_effectiveness = 1.0;
+    for (int i = 0; i < num_ships; i++) {
+        if (!ships[i].alive || ships[i].side != SIDE_PACT) continue;
+        if (ships[i].ecm_power_kw > 50) {
+            /* Dedicated EW platforms with high ECM power can jam Link-16 */
+            double jam_range = ships[i].ecm_power_kw * 0.5; /* NM */
+            /* Check if any NATO ship is within jam range */
+            for (int j = 0; j < num_ships; j++) {
+                if (!ships[j].alive || ships[j].side != SIDE_NATO) continue;
+                double d = dist_nm(&ships[i], &ships[j]);
+                if (d < jam_range) {
+                    double jam_eff = (1.0 - d / jam_range) * 0.6;
+                    ships[j].link16_degraded = 1;
+                    ships[j].link16_quality = 1.0 - jam_eff;
+                    if (ships[j].link16_quality < 0.3) ships[j].link16_quality = 0.3;
+                    stat_comms_jammed[SIDE_PACT]++;
+                }
+            }
+        }
+    }
+
+    /* Now share contacts via Link-16 */
+    for (int j = 0; j < num_ships; j++) {
+        if (!nato_detected[j]) continue;
+        for (int i = 0; i < num_ships; i++) {
+            if (!ships[i].alive || ships[i].side != SIDE_NATO) continue;
+            if (!ships[i].has_link16) continue;
+
+            /* Probabilistic sharing based on link quality */
+            double share_prob = ships[i].link16_quality;
+            if (rng_uniform() < share_prob) {
+                if (!ships[j].detected_by_link16) {
+                    ships[j].detected_by_link16 = 1;
+                    ships[j].detected = 1;
+                    stat_link16_shares[SIDE_NATO]++;
+                }
+            }
+        }
+    }
+
+    /* Log significant comms jamming events */
+    if (tick % 120 == 0) {
+        for (int i = 0; i < num_ships; i++) {
+            if (!ships[i].alive || ships[i].side != SIDE_NATO) continue;
+            if (ships[i].link16_degraded) {
+                evt_log(tick, CP_YELLOW, "[COMMS-JAM] %s Link-16 degraded (%.0f%%)",
+                        ships[i].name, ships[i].link16_quality * 100);
+            }
+        }
+    }
+
+    /* Reset link16_degraded each tick (re-evaluated next tick) */
+    for (int i = 0; i < num_ships; i++) {
+        ships[i].link16_degraded = 0;
+        ships[i].link16_quality = 1.0;
+    }
+}
+
+/* ── Detection Phase (radar) ─────────────────────────────── */
 static void phase_detect(int tick) {
+    /* Reset detected flags each tick; Link-16 and sonar will re-set */
+    for (int i = 0; i < num_ships; i++) {
+        ships[i].detected = 0;
+        ships[i].detected_by_link16 = 0;
+    }
+
     for (int i = 0; i < num_ships; i++) {
         if (!ships[i].alive) continue;
+        /* Submarines don't use radar */
+        if (ships[i].is_submerged) continue;
+
+        /* Mark radar as emitting for HARM targeting */
+        ships[i].search_radar.emitting = 1;
+        ships[i].fire_control_radar.emitting = 1;
+
         for (int j = 0; j < num_ships; j++) {
             if (i==j || !ships[j].alive) continue;
             if (ships[i].side == ships[j].side) continue;
-            /* Submerged submarines are invisible to radar */
             if (ships[j].is_submerged) continue;
 
             double d = dist_nm(&ships[i], &ships[j]);
@@ -871,11 +1069,28 @@ static void phase_detect(int tick) {
                 if (jam_eff > 0.3) {
                     radar_range *= (1.0 - jam_eff * 0.45);
                     radar->jam_strength = jam_eff;
+                    radar->jammed = 1;
                     stat_detect_jammed[ships[i].side]++;
                 }
             }
 
-            /* Small ship sensor penalty in heavy weather */
+            /* Frequency hopping: reduce jam effectiveness */
+            if (radar->jammed && radar->freq_hop_capable && radar->freq_hop_cooldown <= 0) {
+                /* Attempt frequency hop */
+                double hop_success = 0.65; /* 65% chance of successful hop */
+                if (rng_uniform() < hop_success) {
+                    radar->jam_strength *= 0.3; /* dramatically reduce jam effect */
+                    radar_range = radar->base_range_nm * ships[i].radar_effectiveness * wx_radar *
+                                  (1.0 - radar->jam_strength * 0.45);
+                    radar->freq_hop_cooldown = 30; /* 30 second cooldown */
+                    stat_freq_hops[ships[i].side]++;
+                    if (tick % 120 == 0)
+                        evt_log(tick, CP_CYAN, "[FREQ-HOP] %s radar frequency hop",
+                                ships[i].name);
+                }
+            }
+            if (radar->freq_hop_cooldown > 0) radar->freq_hop_cooldown--;
+
             if (ships[i].ship_class >= CLASS_FRIGATE)
                 radar_range *= wx_small;
 
@@ -894,52 +1109,45 @@ static void phase_detect(int tick) {
                 if (rng_uniform() < p_det) {
                     stat_detect_success[ships[i].side]++;
                     ships[j].detected = 1;
-                    if (tick % 60 == 0) {
-                        printf("  " ANSI_CYAN "[RADAR]" ANSI_RESET
-                               " %s %s → %s %s at %.1f NM brg %03.0f%s\n",
-                               side_str(ships[i].side), ships[i].name,
-                               side_str(ships[j].side), ships[j].name,
-                               d, bearing_deg(&ships[i], &ships[j]),
-                               radar->jam_strength>0.3?" [JAMMED]":"");
-                    }
+                    if (tick % 120 == 0)
+                        evt_log(tick, CP_CYAN, "[RADAR] %s %s > %s %s %.0fNM brg%03.0f%s",
+                                side_str(ships[i].side), ships[i].name,
+                                side_str(ships[j].side), ships[j].name,
+                                d, bearing_deg(&ships[i], &ships[j]),
+                                radar->jam_strength>0.3?" [JAM]":"");
                 }
             }
         }
     }
 }
 
-/* ── Sonar Detection Phase (submarines only) ────────────── */
+/* ── Sonar Detection Phase ──────────────────────────────── */
 static void phase_sonar(int tick) {
     for (int i = 0; i < num_ships; i++) {
         if (!ships[i].alive) continue;
         if (ships[i].sonar.passive_range_nm <= 0 &&
-            ships[i].sonar.active_range_nm  <= 0) continue; /* no sonar */
+            ships[i].sonar.active_range_nm  <= 0) continue;
 
         for (int j = 0; j < num_ships; j++) {
             if (i==j || !ships[j].alive) continue;
             if (ships[i].side == ships[j].side) continue;
-            if (!ships[j].is_submerged) continue; /* sonar phase only hunts subs */
+            if (!ships[j].is_submerged) continue;
 
             double d = dist_nm(&ships[i], &ships[j]);
 
-            /* Passive sonar */
             double p_rng = ships[i].sonar.passive_range_nm;
             if (ships[i].sonar.has_towed_array &&
                 ships[i].sonar.towed_range_nm > p_rng)
                 p_rng = ships[i].sonar.towed_range_nm;
-
-            /* Sea noise penalty */
             p_rng *= (1.0 - sea_state * 0.05);
             if (p_rng < 5) p_rng = 5;
 
             if (d < p_rng) {
                 double p_det = 0.3 + 0.5*(1.0 - d/p_rng);
-                /* Akula is quieter than Victor */
                 if (ships[j].ship_class == CLASS_SUBMARINE) {
-                    if (strstr(ships[j].name,"Akula"))       p_det *= 0.55; /* quiet */
-                    else if (strstr(ships[j].name,"Virginia"))p_det *= 0.45; /* very quiet */
+                    if (strstr(ships[j].name,"Akula"))       p_det *= 0.55;
+                    else if (strstr(ships[j].name,"Virginia"))p_det *= 0.45;
                     else if (strstr(ships[j].name,"Los Ang")) p_det *= 0.50;
-                    /* Victor III: noisy by Cold War standards */
                 }
                 p_det *= rng_gauss(1.0, 0.15);
                 if (p_det < 0) p_det = 0;
@@ -948,19 +1156,16 @@ static void phase_sonar(int tick) {
                 if (rng_uniform() < p_det) {
                     ships[j].detected = 1;
                     if (tick % 120 == 0)
-                        printf("  " ANSI_BLUE "[SONAR]" ANSI_RESET
-                               " %s %s passive contact: %s %s %.1f NM\n",
-                               side_str(ships[i].side), ships[i].name,
-                               side_str(ships[j].side), ships[j].name, d);
+                        evt_log(tick, CP_CYAN, "[SONAR] %s %s passive: %s %s %.0fNM",
+                                side_str(ships[i].side), ships[i].name,
+                                side_str(ships[j].side), ships[j].name, d);
                 }
             }
 
-            /* Active sonar: louder, reveals the pinger */
             if (ships[i].sonar.active_on) {
                 double a_rng = ships[i].sonar.active_range_nm;
                 if (d < a_rng) {
                     ships[j].detected = 1;
-                    /* Pinger is now detectable by ESM */
                     ships[i].detected = 1;
                 }
             }
@@ -969,17 +1174,15 @@ static void phase_sonar(int tick) {
 }
 
 /* ── CIWS / SAM / Chaff Intercept Logic ─────────────────── */
-/* Returns 1 if projectile was intercepted */
 static int check_intercepts(Projectile *proj, int tick) {
     if (!proj->active || !proj->is_missile) return 0;
 
-    /* Find which side the projectile is targeting */
-    Side threat_side = SIDE_NATO; /* side launching the missile */
+    Side threat_side = SIDE_NATO;
     if (proj->attacker_idx >= 0 && proj->attacker_idx < num_ships)
         threat_side = ships[proj->attacker_idx].side;
     Side def_side = (threat_side == SIDE_NATO) ? SIDE_PACT : SIDE_NATO;
 
-    /* Layer 1: Long-range area SAM (SM-2, S-300F) */
+    /* Layer 1: Long-range SAM */
     for (int i = 0; i < num_ships; i++) {
         Ship *def = &ships[i];
         if (!def->alive || def->side != def_side) continue;
@@ -987,56 +1190,54 @@ static int check_intercepts(Projectile *proj, int tick) {
 
         for (int w = 0; w < def->num_weapons; w++) {
             Weapon *wpn = &def->weapons[w];
-            if (!wpn->is_sam || wpn->is_ciws) continue; /* pure SAMs only */
+            if (!wpn->is_sam || wpn->is_ciws) continue;
             if (wpn->ammo <= 0 || wpn->cooldown > 0) continue;
             if (d > wpn->range_nm) continue;
 
             double p_int = wpn->p_hit * wx_radar * def->radar_effectiveness;
-            /* Sea-skimmers are harder for SAMs */
             if (proj->is_sea_skimmer) p_int *= 0.60;
+            /* HARM missiles are harder to intercept (high speed, small RCS) */
+            if (proj->is_harm) p_int *= 0.70;
 
             if (rng_uniform() < p_int) {
                 wpn->ammo -= (wpn->salvo_size < wpn->ammo ? wpn->salvo_size : wpn->ammo);
                 wpn->cooldown = wpn->reload_ticks;
                 proj->active = 0; proj->intercepted = 1;
                 stat_sam_intercepts[def_side]++;
-                printf("  " ANSI_GREEN "[SAM-KILL]" ANSI_RESET
-                       " %s %s | %s at %.1f NM\n",
-                       def->name, wpn->name, proj->weapon_name, d);
+                evt_log(tick, CP_NATO, "[SAM-KILL] %s %s | %s %.1fNM",
+                        def->name, wpn->name, proj->weapon_name, d);
                 log_event(tick, proj->attacker, def->name, wpn->name,
                           1, 0, def->hp, 0, EVT_SAM_INTERCEPT);
                 return 1;
             } else {
-                /* Fired but missed */
                 wpn->ammo -= (wpn->salvo_size < wpn->ammo ? wpn->salvo_size : wpn->ammo);
                 wpn->cooldown = wpn->reload_ticks;
-                break; /* one attempt per ship per missile per tick */
+                break;
             }
         }
         if (proj->intercepted) return 1;
     }
 
-    /* Layer 2: Chaff and ECM seduction */
+    /* Layer 2: Chaff */
     for (int i = 0; i < num_ships; i++) {
         Ship *def = &ships[i];
         if (!def->alive || def->side != def_side) continue;
         double d = dist_nm_xy(proj->x, proj->y, def->x, def->y);
-        if (d > 0.8) continue; /* chaff window: missile within 0.8 NM */
-
-        /* Only deploy if this ship is the apparent target */
+        if (d > 0.8) continue;
         if (strcmp(proj->target, def->name) != 0) continue;
 
         if (def->chaff_charges > 0) {
             double p_chaff = 0.45;
-            if (proj->is_sea_skimmer) p_chaff = 0.20; /* harder to seduce */
+            if (proj->is_sea_skimmer) p_chaff = 0.20;
+            if (proj->is_harm) p_chaff = 0.10; /* HARM homes on emissions, not radar return */
             if (def->ecm_power_kw > 60) p_chaff += 0.10;
 
             def->chaff_charges--;
             if (rng_uniform() < p_chaff) {
                 proj->active = 0; proj->intercepted = 1;
                 stat_chaff_seductions[def_side]++;
-                printf("  " ANSI_YELLOW "[CHAFF]" ANSI_RESET
-                       " %s seduced %s\n", def->name, proj->weapon_name);
+                evt_log(tick, CP_YELLOW, "[CHAFF] %s seduced %s",
+                        def->name, proj->weapon_name);
                 log_event(tick, proj->attacker, def->name, "Chaff",
                           0, 0, def->hp, 0, EVT_CHAFF_SEDUCE);
                 return 1;
@@ -1044,7 +1245,7 @@ static int check_intercepts(Projectile *proj, int tick) {
         }
     }
 
-    /* Layer 3: CIWS last-ditch */
+    /* Layer 3: CIWS */
     for (int i = 0; i < num_ships; i++) {
         Ship *def = &ships[i];
         if (!def->alive || def->side != def_side) continue;
@@ -1057,35 +1258,32 @@ static int check_intercepts(Projectile *proj, int tick) {
             if (wpn->ammo <= 0) continue;
             if (d > wpn->range_nm) continue;
 
-            /* Burst: consume rounds */
-            int burst = wpn->is_sam ? 1 : 20; /* SeaRAM fires 1 missile; Phalanx bursts */
+            int burst = wpn->is_sam ? 1 : 20;
             if (burst > wpn->ammo) burst = wpn->ammo;
             wpn->ammo -= burst;
             wpn->rounds_fired_total += burst;
 
-            /* Barrel wear / overheat check */
             if (!wpn->is_sam && wpn->rounds_fired_total > wpn->magazine_limit * 0.75) {
                 wpn->overheated = 1;
                 wpn->overheat_cooldown = 90;
-                printf("  " ANSI_YELLOW "[CIWS-HOT]" ANSI_RESET " %s %s overheating!\n",
-                       def->name, wpn->name);
+                evt_log(tick, CP_YELLOW, "[CIWS-HOT] %s %s overheating!",
+                        def->name, wpn->name);
             }
 
             double p_int = wpn->p_hit * wx_radar;
-            if (proj->is_sea_skimmer) p_int *= 0.72; /* skimmers are hard */
+            if (proj->is_sea_skimmer) p_int *= 0.72;
+            if (proj->is_harm) p_int *= 0.65;
             if (def->radar_effectiveness < 0.7) p_int *= def->radar_effectiveness;
 
             if (rng_uniform() < p_int) {
                 proj->active = 0; proj->intercepted = 1;
                 stat_ciws_intercepts[def_side]++;
-                printf("  " ANSI_GREEN "[CIWS-KILL]" ANSI_RESET
-                       " %s %s → %s at %.2f NM\n",
-                       def->name, wpn->name, proj->weapon_name, d);
+                evt_log(tick, CP_NATO, "[CIWS-KILL] %s %s > %s %.2fNM",
+                        def->name, wpn->name, proj->weapon_name, d);
                 log_event(tick, proj->attacker, def->name, wpn->name,
                           1, 0, def->hp, 0, EVT_CIWS_INTERCEPT);
                 return 1;
             }
-            /* Only one CIWS attempt per defensive ship per missile */
             break;
         }
         if (proj->intercepted) return 1;
@@ -1093,18 +1291,17 @@ static int check_intercepts(Projectile *proj, int tick) {
     return 0;
 }
 
-/* Torpedo decoy check */
 static int check_torpedo_decoy(Projectile *proj, Ship *target, int tick) {
     if (!proj->is_torpedo || target->nixie_charges <= 0) return 0;
     double d = dist_nm_xy(proj->x, proj->y, target->x, target->y);
-    if (d > 0.5) return 0; /* only works close in */
+    if (d > 0.5) return 0;
     target->nixie_charges--;
     double p_decoy = 0.40;
     if (rng_uniform() < p_decoy) {
         proj->active = 0; proj->intercepted = 1;
         stat_torpedo_decoys[target->side]++;
-        printf("  " ANSI_YELLOW "[NIXIE]" ANSI_RESET " %s decoyed %s torpedo\n",
-               target->name, proj->weapon_name);
+        evt_log(tick, CP_YELLOW, "[NIXIE] %s decoyed %s",
+                target->name, proj->weapon_name);
         log_event(tick, proj->attacker, target->name, "Nixie",
                   0, 0, target->hp, 0, EVT_TORPEDO_DECOY);
         return 1;
@@ -1119,9 +1316,7 @@ static void phase_move(int tick) {
         Ship *s = &ships[i];
         if (!s->alive) continue;
 
-        /* Submarines: prefer to stay deep and at stand-off range */
         double approach_factor = (s->is_submerged) ? 1.3 : 0.7;
-
         double min_d = 1e9; int tgt = -1;
         for (int j = 0; j < num_ships; j++) {
             if (i==j || !ships[j].alive || ships[j].side==s->side) continue;
@@ -1166,7 +1361,7 @@ static void phase_move(int tick) {
 
 /* ── Weapons Phase ───────────────────────────────────────── */
 static void phase_weapons(int tick) {
-    /* CIWS overheat cooldown */
+    /* CIWS cooldown */
     for (int i = 0; i < num_ships; i++) {
         if (!ships[i].alive) continue;
         for (int w = 0; w < ships[i].num_weapons; w++) {
@@ -1174,8 +1369,7 @@ static void phase_weapons(int tick) {
             if (wpn->overheated) {
                 if (--wpn->overheat_cooldown <= 0) {
                     wpn->overheated = 0;
-                    printf("  " ANSI_CYAN "[CIWS-COOL]" ANSI_RESET " %s %s cooled\n",
-                           ships[i].name, wpn->name);
+                    evt_log(tick, CP_CYAN, "[CIWS-COOL] %s %s cooled", ships[i].name, wpn->name);
                 }
             }
         }
@@ -1191,22 +1385,47 @@ static void phase_weapons(int tick) {
             if (wpn->cooldown > 0) { wpn->cooldown--; continue; }
             if (wpn->ammo <= 0) continue;
             if (wpn->overheated) continue;
-            /* CIWS/SAMs don't fire offensively in this phase */
             if (wpn->is_ciws || wpn->is_sam) continue;
 
-            /* Find best target */
+            /* HARM: special targeting - look for ships with active radars */
+            if (wpn->is_harm) {
+                int best_tgt = -1;
+                double best_d = 1e9;
+                for (int j = 0; j < num_ships; j++) {
+                    if (!ships[j].alive || ships[j].side == atk->side) continue;
+                    if (!ships[j].search_radar.emitting) continue;
+                    double d = dist_nm(atk, &ships[j]);
+                    if (d > wpn->range_nm) continue;
+                    /* Prioritize ships with strongest radar emissions */
+                    double score = ships[j].search_radar.power_kw / (d + 1.0);
+                    if (score > 0 && d < best_d) { best_d = d; best_tgt = j; }
+                }
+                if (best_tgt < 0) continue;
+
+                Ship *def = &ships[best_tgt];
+                int rounds = wpn->salvo_size < wpn->ammo ? wpn->salvo_size : wpn->ammo;
+                wpn->ammo -= rounds;
+                wpn->cooldown = wpn->reload_ticks;
+
+                for (int r = 0; r < rounds && num_projectiles < MAX_PROJECTILES; r++) {
+                    init_projectile(&projectiles[num_projectiles], atk, def, wpn, tick);
+                    num_projectiles++;
+                }
+                stat_launches[atk->side] += rounds;
+                evt_log(tick, CP_MAGENTA, "[HARM] %s %s > %s | %s x%d @ %.0fNM",
+                        side_str(atk->side), atk->name, def->name,
+                        wpn->name, rounds, best_d);
+                continue;
+            }
+
+            /* Normal weapon targeting */
             int best_tgt = -1;
             double best_score = -1;
             for (int j = 0; j < num_ships; j++) {
                 if (!ships[j].alive || ships[j].side==atk->side) continue;
                 if (!ships[j].detected) continue;
-
-                /* Anti-sub weapons only target subs */
                 if (wpn->is_anti_sub && ships[j].ship_class != CLASS_SUBMARINE) continue;
-                /* Non-anti-sub weapons shouldn't waste shots on submerged subs */
                 if (!wpn->is_anti_sub && ships[j].is_submerged) continue;
-
-                /* Check mount disabled */
                 if (wpn->mount_position == 0 && atk->fwd_weapons_disabled) continue;
                 if (wpn->mount_position == 2 && atk->aft_weapons_disabled) continue;
 
@@ -1238,18 +1457,16 @@ static void phase_weapons(int tick) {
                 launched++;
             }
             stat_launches[atk->side] += launched;
-            printf("  " ANSI_YELLOW "[LAUNCH]" ANSI_RESET
-                   " %s %s → %s | %s x%d @ %.1f NM\n",
-                   side_str(atk->side), atk->name, def->name,
-                   wpn->name, rounds, d);
+            evt_log(tick, CP_YELLOW, "[LAUNCH] %s %s > %s | %s x%d @ %.0fNM",
+                    side_str(atk->side), atk->name, def->name,
+                    wpn->name, rounds, d);
         }
     }
 
-    /* Update projectiles, run intercepts, check impacts */
+    /* Update projectiles, intercepts, impacts */
     for (int p = 0; p < num_projectiles; p++) {
         if (!projectiles[p].active) continue;
 
-        /* Run CIWS/SAM intercepts before physics (in-envelope check) */
         if (projectiles[p].is_missile) {
             if (check_intercepts(&projectiles[p], tick)) {
                 stat_misses[projectiles[p].attacker_idx >= 0 ?
@@ -1275,36 +1492,42 @@ static void phase_weapons(int tick) {
             if (strcmp(ships[i].name, projectiles[p].attacker) == 0) continue;
             Side as = (projectiles[p].attacker_idx>=0) ?
                 ships[projectiles[p].attacker_idx].side : SIDE_NATO;
-            if (ships[i].side == as) continue; /* no friendly fire */
+            if (ships[i].side == as) continue;
 
             double dx = projectiles[p].x - ships[i].x;
             double dy = projectiles[p].y - ships[i].y;
-            double dist = sqrt(dx*dx + dy*dy);
+            double ddist = sqrt(dx*dx + dy*dy);
 
-            /* Hit radius */
             double hit_r = 0.05;
             if (ships[i].ship_class == CLASS_CARRIER)  hit_r = 0.15;
             else if (ships[i].ship_class == CLASS_CRUISER) hit_r = 0.10;
 
-            /* Torpedo: check underwater proximity; also check decoy */
             if (projectiles[p].is_torpedo) {
-                if (dist > hit_r) continue;
+                if (ddist > hit_r) continue;
                 if (check_torpedo_decoy(&projectiles[p], &ships[i], tick)) break;
             } else {
-                if (dist > hit_r) continue;
+                if (ddist > hit_r) continue;
             }
 
-            /* HIT */
+            /* HARM: extra damage to radar compartment */
             double dmg = projectiles[p].damage * (1.0 - ships[i].armor);
-
-            /* Guidance variance */
             WeaponTemplate *wt = find_weapon(projectiles[p].weapon_name);
             double gq = wt ? wt->guidance_quality : 0.5;
             dmg *= rng_gauss(1.0, gq > 0.7 ? 0.10 : 0.25);
             if (dmg < 1) dmg = 1;
 
-            /* Apply to compartments */
-            int comp = (int)(rng_uniform() * MAX_COMPARTMENTS);
+            int comp;
+            if (projectiles[p].is_harm) {
+                /* HARM specifically targets radar installations */
+                comp = COMP_RADAR;
+                ships[i].compartments[comp].integrity -= dmg / ships[i].max_hp * 2.0;
+                stat_harm_hits[as]++;
+                evt_log(tick, CP_MAGENTA, "[HARM-HIT] %s > %s radar %.0f dmg",
+                        projectiles[p].weapon_name, ships[i].name, dmg);
+            } else {
+                comp = (int)(rng_uniform() * MAX_COMPARTMENTS);
+            }
+
             if (comp < MAX_COMPARTMENTS) {
                 ships[i].compartments[comp].integrity -= dmg / ships[i].max_hp;
                 if (ships[i].compartments[comp].integrity < 0.3) {
@@ -1328,22 +1551,24 @@ static void phase_weapons(int tick) {
                 stat_kills_by_side[as]++;
             }
 
-            printf("  " ANSI_RED "[IMPACT]" ANSI_RESET
-                   " %s → %s %.0f dmg%s [HP: %.0f/%.0f]\n",
-                   projectiles[p].weapon_name, ships[i].name, dmg,
-                   killed ? " " ANSI_BOLD ANSI_RED "*** SUNK ***" ANSI_RESET : "",
-                   ships[i].hp, ships[i].max_hp);
+            int cpair = CP_ALERT;
+            if (!projectiles[p].is_harm) {
+                evt_log(tick, cpair, "[IMPACT] %s > %s %.0f dmg%s [HP:%.0f/%.0f]",
+                        projectiles[p].weapon_name, ships[i].name, dmg,
+                        killed ? " ***SUNK***" : "",
+                        ships[i].hp, ships[i].max_hp);
+            }
 
             log_event(tick, projectiles[p].attacker, ships[i].name,
                       projectiles[p].weapon_name, 1, dmg, ships[i].hp,
-                      killed, EVT_HIT);
+                      killed, projectiles[p].is_harm ? EVT_HARM_STRIKE : EVT_HIT);
 
             projectiles[p].active = 0;
             break;
         }
     }
 
-    /* Compact inactive projectiles */
+    /* Compact */
     if (tick % 20 == 0) {
         int ac = 0;
         for (int p = 0; p < num_projectiles; p++) {
@@ -1353,6 +1578,205 @@ static void phase_weapons(int tick) {
             }
         }
         num_projectiles = ac;
+    }
+}
+
+/* ── Air-to-Air Combat ──────────────────────────────────── */
+/* CAP sorties intercept enemy STRIKE sorties */
+static void phase_air_to_air(int tick) {
+    for (int i = 0; i < num_ships; i++) {
+        Ship *carrier = &ships[i];
+        if (!carrier->alive || carrier->max_sorties == 0) continue;
+
+        for (int s = 0; s < MAX_SORTIES; s++) {
+            AircraftSortie *cap = &carrier->sorties[s];
+            if (!cap->active || cap->type != SORTIE_CAP) continue;
+            if (cap->destroyed) continue;
+
+            /* CAP patrols area around carrier */
+            cap->x = carrier->x + rng_gauss(0, 30);
+            cap->y = carrier->y + rng_gauss(0, 30);
+
+            /* Look for enemy strike sorties within intercept range */
+            for (int j = 0; j < num_ships; j++) {
+                Ship *enemy_cv = &ships[j];
+                if (!enemy_cv->alive || enemy_cv->side == carrier->side) continue;
+                if (enemy_cv->max_sorties == 0) continue;
+
+                for (int es = 0; es < MAX_SORTIES; es++) {
+                    AircraftSortie *strike = &enemy_cv->sorties[es];
+                    if (!strike->active || strike->destroyed) continue;
+                    if (strike->type != SORTIE_STRIKE) continue;
+
+                    /* Compute strike position (interpolate toward target) */
+                    double progress = (double)(tick - strike->launch_tick) /
+                                      (double)(strike->return_tick - strike->launch_tick + 1);
+                    if (progress > 1.0) progress = 1.0;
+                    double strike_x = enemy_cv->x;
+                    double strike_y = enemy_cv->y;
+                    if (strike->target_ship_idx >= 0 && strike->target_ship_idx < num_ships) {
+                        strike_x += (ships[strike->target_ship_idx].x - enemy_cv->x) * progress;
+                        strike_y += (ships[strike->target_ship_idx].y - enemy_cv->y) * progress;
+                    }
+                    strike->x = strike_x;
+                    strike->y = strike_y;
+
+                    /* Check intercept range */
+                    double d = dist_nm_xy(cap->x, cap->y, strike_x, strike_y);
+                    if (d > 80) continue; /* beyond CAP patrol range */
+
+                    /* Air combat resolution */
+                    /* NATO F-14/F-18 vs PACT Su-33 */
+                    double p_kill;
+                    if (carrier->side == SIDE_NATO) {
+                        /* F-14/F-18: better BVR capability, AIM-120 AMRAAM */
+                        p_kill = 0.35;
+                        if (carrier->stobar) p_kill = 0.25; /* shouldn't happen for NATO */
+                    } else {
+                        /* Su-33: good dogfighter but inferior BVR */
+                        p_kill = 0.20;
+                    }
+
+                    /* AEW bonus: if friendly AEW is up, better intercept */
+                    for (int ck = 0; ck < MAX_SORTIES; ck++) {
+                        if (carrier->sorties[ck].active &&
+                            carrier->sorties[ck].type == SORTIE_AEW)
+                            p_kill += 0.10;
+                    }
+
+                    /* Only attempt intercept once per tick per pairing */
+                    if (rng_uniform() < p_kill * 0.02) { /* per-tick probability */
+                        strike->destroyed = 1;
+                        strike->effect_applied = 1; /* prevent damage delivery */
+                        stat_a2a_kills[carrier->side]++;
+                        evt_log(tick, CP_MAGENTA,
+                                "[A2A-KILL] %s CAP shot down %s strike sortie",
+                                carrier->name, enemy_cv->name);
+                        log_event(tick, carrier->name, enemy_cv->name,
+                                  "Air-to-Air", 1, 0, 0, 0, EVT_AIR_TO_AIR);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ── Helicopter Phase ────────────────────────────────────── */
+static void phase_helicopters(int tick) {
+    for (int i = 0; i < num_ships; i++) {
+        Ship *s = &ships[i];
+        if (!s->alive || s->helo_capacity == 0) continue;
+        if (s->is_submerged) continue; /* subs don't launch helos */
+
+        /* Process returning helos */
+        for (int h = 0; h < 4; h++) {
+            AircraftSortie *helo = &s->helo_sorties[h];
+            if (!helo->active) continue;
+
+            /* Update helo position */
+            helo->x = s->x + rng_gauss(0, 15);
+            helo->y = s->y + rng_gauss(0, 15);
+
+            /* Mid-mission ASW attack */
+            if (!helo->effect_applied && tick >= (helo->launch_tick + helo->return_tick)/2) {
+                helo->effect_applied = 1;
+
+                /* Hunt nearest enemy sub */
+                for (int j = 0; j < num_ships; j++) {
+                    if (!ships[j].alive || ships[j].side == s->side) continue;
+                    if (ships[j].ship_class != CLASS_SUBMARINE) continue;
+                    if (!ships[j].detected) continue;
+                    double d = dist_nm(s, &ships[j]);
+                    if (d > 40) continue; /* helo ASW range from parent ship */
+
+                    double p_kill = 0.30 * wx_asw_helo;
+                    /* SH-60 with dipping sonar */
+                    if (s->side == SIDE_NATO) p_kill += 0.10;
+
+                    if (rng_uniform() < p_kill) {
+                        double dmg = rng_gauss(140, 25) * (1.0 - ships[j].armor);
+                        if (dmg < 20) dmg = 20;
+                        ships[j].hp -= dmg;
+                        s->damage_dealt_total += (int)dmg;
+                        stat_helo_asw[s->side]++;
+
+                        int killed = (ships[j].hp <= 0);
+                        if (killed) {
+                            ships[j].hp = 0; ships[j].alive = 0;
+                            s->kills++;
+                            stat_kills_by_side[s->side]++;
+                        }
+                        evt_log(tick, CP_MAGENTA,
+                                "[HELO-ASW] %s SH-60 > %s %.0f dmg%s",
+                                s->name, ships[j].name, dmg,
+                                killed ? " ***SUNK***" : "");
+                        log_event(tick, s->name, ships[j].name, "Helo ASW Torpedo",
+                                  1, dmg, ships[j].hp, killed, EVT_ASW_ATTACK);
+                    }
+                    break;
+                }
+
+                /* Helo also extends sonar detection */
+                for (int j = 0; j < num_ships; j++) {
+                    if (!ships[j].alive || ships[j].side == s->side) continue;
+                    if (!ships[j].is_submerged) continue;
+                    double d = dist_nm(s, &ships[j]);
+                    if (d < 30) {
+                        double p_det = 0.40 * wx_asw_helo;
+                        if (rng_uniform() < p_det) {
+                            ships[j].detected = 1;
+                            evt_log(tick, CP_CYAN,
+                                    "[HELO-SONAR] %s helo detected %s %.0fNM",
+                                    s->name, ships[j].name, d);
+                        }
+                    }
+                }
+            }
+
+            /* Return */
+            if (tick >= helo->return_tick) {
+                helo->active = 0;
+                s->helos_in_flight--;
+                s->helos_available++;
+            }
+        }
+
+        /* Launch new helo sorties every 120 ticks */
+        if (tick % 120 != 0) continue;
+        if (s->helos_available <= 0) continue;
+        if (s->helos_in_flight >= s->helo_capacity) continue;
+
+        /* Only launch if there's a sub threat or ASW mission */
+        int sub_threat = 0;
+        for (int j = 0; j < num_ships; j++) {
+            if (!ships[j].alive || ships[j].side == s->side) continue;
+            if (ships[j].ship_class == CLASS_SUBMARINE) {
+                if (ships[j].detected || dist_nm(s, &ships[j]) < 50) {
+                    sub_threat = 1;
+                    break;
+                }
+            }
+        }
+        if (!sub_threat && rng_uniform() > 0.3) continue; /* sometimes launch patrol anyway */
+
+        for (int h = 0; h < 4; h++) {
+            if (s->helo_sorties[h].active) continue;
+            AircraftSortie *helo = &s->helo_sorties[h];
+            helo->active = 1;
+            helo->type = SORTIE_HELO_ASW;
+            helo->launch_tick = tick;
+            helo->return_tick = tick + 360; /* 6 minute mission */
+            helo->target_ship_idx = -1;
+            helo->effect_applied = 0;
+            helo->destroyed = 0;
+            helo->x = s->x;
+            helo->y = s->y;
+            s->helos_available--;
+            s->helos_in_flight++;
+            evt_log(tick, CP_MAGENTA, "[HELO] %s launches SH-60 ASW sortie (%d/%d)",
+                    s->name, s->helos_in_flight, s->helo_capacity);
+            break;
+        }
     }
 }
 
@@ -1367,18 +1791,32 @@ static void phase_aviation(int tick) {
             AircraftSortie *sr = &carrier->sorties[s];
             if (!sr->active) continue;
 
+            /* Update sortie position for map display */
+            if (sr->target_ship_idx >= 0 && sr->target_ship_idx < num_ships) {
+                double progress = (double)(tick - sr->launch_tick) /
+                                  (double)(sr->return_tick - sr->launch_tick + 1);
+                if (progress > 1.0) progress = 1.0;
+                if (progress > 0.5) progress = 1.0 - progress; /* return leg */
+                sr->x = carrier->x + (ships[sr->target_ship_idx].x - carrier->x) * progress * 2.0;
+                sr->y = carrier->y + (ships[sr->target_ship_idx].y - carrier->y) * progress * 2.0;
+            } else {
+                sr->x = carrier->x + rng_gauss(0, 20);
+                sr->y = carrier->y + rng_gauss(0, 20);
+            }
+
             /* Mid-mission effect */
             if (!sr->effect_applied && tick >= (sr->launch_tick + sr->return_tick)/2) {
                 sr->effect_applied = 1;
-                if (sr->type == SORTIE_STRIKE && sr->target_ship_idx >= 0) {
+
+                if (sr->destroyed) {
+                    /* Shot down by CAP — no effect */
+                } else if (sr->type == SORTIE_STRIKE && sr->target_ship_idx >= 0) {
                     Ship *tgt = &ships[sr->target_ship_idx];
                     if (tgt->alive) {
                         double base_dmg = carrier->stobar ? 120.0 : 170.0;
                         double dmg = rng_gauss(base_dmg, 30.0) * (1.0 - tgt->armor);
-                        /* Sea state affects delivery */
                         dmg *= (0.75 + wx_ir * 0.25);
                         if (dmg < 20) dmg = 20;
-                        /* Apply to compartments */
                         for (int h = 0; h < 2; h++) {
                             int c = (int)(rng_uniform() * MAX_COMPARTMENTS);
                             tgt->compartments[c].integrity -= dmg / (2.0 * tgt->max_hp);
@@ -1398,22 +1836,21 @@ static void phase_aviation(int tick) {
                             carrier->kills++;
                             stat_kills_by_side[carrier->side]++;
                         }
-                        printf("  " ANSI_MAGENTA "[AIR STRIKE]" ANSI_RESET
-                               " %s aircraft → %s %.0f dmg%s [HP: %.0f/%.0f]\n",
-                               carrier->name, tgt->name, dmg,
-                               killed?" " ANSI_BOLD ANSI_RED "*** SUNK ***" ANSI_RESET:"",
-                               tgt->hp, tgt->max_hp);
+                        evt_log(tick, CP_MAGENTA,
+                                "[AIR STRIKE] %s > %s %.0f dmg%s [HP:%.0f/%.0f]",
+                                carrier->name, tgt->name, dmg,
+                                killed?" ***SUNK***":"",
+                                tgt->hp, tgt->max_hp);
                         log_event(tick, carrier->name, tgt->name, "Air Strike",
                                   1, dmg, tgt->hp, killed, EVT_AIR_STRIKE);
                     }
                 } else if (sr->type == SORTIE_ASW) {
-                    /* Hunt nearest enemy sub */
                     for (int j = 0; j < num_ships; j++) {
                         if (!ships[j].alive || ships[j].side==carrier->side) continue;
                         if (ships[j].ship_class != CLASS_SUBMARINE) continue;
                         if (!ships[j].detected) continue;
                         double d = dist_nm(carrier, &ships[j]);
-                        if (d > 80) continue; /* helo range */
+                        if (d > 80) continue;
 
                         double p_kill = 0.35 * wx_asw_helo;
                         if (rng_uniform() < p_kill) {
@@ -1428,60 +1865,58 @@ static void phase_aviation(int tick) {
                                 carrier->kills++;
                                 stat_kills_by_side[carrier->side]++;
                             }
-                            printf("  " ANSI_MAGENTA "[ASW HIT]" ANSI_RESET
-                                   " %s helo → %s %.0f dmg%s\n",
-                                   carrier->name, ships[j].name, dmg,
-                                   killed?" ***SUNK***":"");
+                            evt_log(tick, CP_MAGENTA,
+                                    "[ASW HIT] %s helo > %s %.0f dmg%s",
+                                    carrier->name, ships[j].name, dmg,
+                                    killed?" ***SUNK***":"");
                             log_event(tick, carrier->name, ships[j].name, "ASW Torpedo",
                                       1, dmg, ships[j].hp, killed, EVT_ASW_ATTACK);
                         }
                         break;
                     }
                 } else if (sr->type == SORTIE_AEW) {
-                    /* E-2C extends carrier radar range while airborne */
                     carrier->search_radar.range_nm =
-                        fmin(carrier->search_radar.range_nm * 1.6, 300.0);
+                        fmin(carrier->search_radar.base_range_nm * 1.6, 300.0);
                 }
             }
 
             /* Return */
             if (tick >= sr->return_tick) {
-                /* Reset AEW radar extension */
                 if (sr->type == SORTIE_AEW)
-                    carrier->search_radar.range_nm /= 1.6;
+                    carrier->search_radar.range_nm = carrier->search_radar.base_range_nm;
                 sr->active = 0;
                 carrier->sorties_in_flight--;
                 carrier->sorties_available++;
             }
         }
 
-        /* Launch new sorties every 60 ticks */
+        /* Launch new sorties */
         if (tick % 60 != 0) continue;
         if (carrier->sorties_available <= 0) continue;
         if (carrier->sorties_in_flight >= carrier->max_sorties / 3) continue;
 
-        /* Decide sortie type */
         SortieType stype = SORTIE_CAP;
         int tgt_idx = -1;
 
-        /* Check if AEW is up */
-        int aew_up = 0;
-        for (int s2 = 0; s2 < MAX_SORTIES; s2++)
-            if (carrier->sorties[s2].active && carrier->sorties[s2].type == SORTIE_AEW)
-                aew_up = 1;
+        int aew_up = 0, cap_up = 0;
+        for (int s2 = 0; s2 < MAX_SORTIES; s2++) {
+            if (!carrier->sorties[s2].active) continue;
+            if (carrier->sorties[s2].type == SORTIE_AEW) aew_up = 1;
+            if (carrier->sorties[s2].type == SORTIE_CAP) cap_up++;
+        }
 
-        /* Priority: AEW first, then ASW if sub contact, then strike */
+        /* Priority: AEW first, then CAP if none, then ASW, then strike */
         if (!aew_up && !carrier->stobar) {
             stype = SORTIE_AEW;
+        } else if (cap_up < 2) {
+            stype = SORTIE_CAP; /* maintain at least 2 CAP sorties */
         } else {
-            /* Check for detected enemy subs nearby */
             for (int j = 0; j < num_ships; j++) {
                 if (!ships[j].alive || ships[j].side==carrier->side) continue;
                 if (ships[j].ship_class!=CLASS_SUBMARINE || !ships[j].detected) continue;
                 if (dist_nm(carrier, &ships[j]) < 80) { stype=SORTIE_ASW; break; }
             }
             if (stype == SORTIE_CAP) {
-                /* Find best strike target */
                 double best = -1;
                 for (int j = 0; j < num_ships; j++) {
                     if (!ships[j].alive || ships[j].side==carrier->side) continue;
@@ -1498,29 +1933,29 @@ static void phase_aviation(int tick) {
             }
         }
 
-        /* Find free sortie slot */
         for (int s2 = 0; s2 < MAX_SORTIES; s2++) {
             if (carrier->sorties[s2].active) continue;
             AircraftSortie *sr = &carrier->sorties[s2];
             sr->active = 1;
             sr->type = stype;
             sr->launch_tick = tick;
-            /* Mission duration: STOBAR slower recovery; AEW stays longer */
+            sr->destroyed = 0;
             int dur = 0;
-            if (stype==SORTIE_AEW)    dur = carrier->stobar ? 0 : 1200; /* E-2C 20 min */
+            if (stype==SORTIE_AEW)    dur = carrier->stobar ? 0 : 1200;
             else if (stype==SORTIE_STRIKE) dur = carrier->stobar ? 900 : 720;
             else if (stype==SORTIE_ASW)    dur = 480;
-            else                           dur = 600; /* CAP */
+            else                           dur = 600;
             sr->return_tick = tick + dur;
             sr->target_ship_idx = tgt_idx;
             sr->effect_applied = 0;
+            sr->x = carrier->x;
+            sr->y = carrier->y;
             carrier->sorties_available--;
             carrier->sorties_in_flight++;
-            printf("  " ANSI_MAGENTA "[SORTIE]" ANSI_RESET
-                   " %s launches %s sortie (%d/%d in flight)%s\n",
-                   carrier->name, sortie_str(stype),
-                   carrier->sorties_in_flight, carrier->max_sorties,
-                   carrier->stobar?" [STOBAR]":"");
+            evt_log(tick, CP_MAGENTA, "[SORTIE] %s launches %s (%d/%d)%s",
+                    carrier->name, sortie_str(stype),
+                    carrier->sorties_in_flight, carrier->max_sorties,
+                    carrier->stobar?" [STOBAR]":"");
             break;
         }
     }
@@ -1528,59 +1963,52 @@ static void phase_aviation(int tick) {
 
 /* ── Damage Consequences Phase ───────────────────────────── */
 static void phase_damage_consequences(int tick) {
-    (void)tick;
     for (int i = 0; i < num_ships; i++) {
         Ship *s = &ships[i];
         if (!s->alive) continue;
 
-        /* Process each compartment */
         for (int c = 0; c < MAX_COMPARTMENTS; c++) {
             DamageCompartment *comp = &s->compartments[c];
 
-            /* Fire spreading */
             if (comp->on_fire) {
-                comp->integrity -= 0.0005; /* slow fire damage */
-                if (rng_uniform() < 0.003) { /* ~0.3% per tick = ~11 min to spread */
+                comp->integrity -= 0.0005;
+                if (rng_uniform() < 0.003) {
                     int adj = (c + 1) % MAX_COMPARTMENTS;
                     s->compartments[adj].on_fire = 1;
                 }
-                /* Magazine fire: high risk of catastrophic explosion */
                 if (c == COMP_MAGAZINE && comp->on_fire && comp->integrity < 0.3) {
-                    if (rng_uniform() < 0.0005) { /* ~0.05% per tick */
-                        printf("  " ANSI_BOLD ANSI_RED "[MAGAZINE EXPLOSION]" ANSI_RESET
-                               " %s magazine detonation!\n", s->name);
+                    if (rng_uniform() < 0.0005) {
+                        evt_log(tick, CP_ALERT,
+                                "[MAG EXPLOSION] %s magazine detonation!", s->name);
                         s->hp = 0; s->alive = 0;
-                        stat_kills_by_side[1 - s->side]++; /* credited to enemy */
+                        stat_kills_by_side[1 - s->side]++;
                         break;
                     }
                 }
             }
 
-            /* Flooding */
             if (comp->flooding) {
-                s->flooding_total += comp->flood_rate / 60.0; /* per-second rate */
+                s->flooding_total += comp->flood_rate / 60.0;
                 comp->integrity -= 0.0001;
             }
         }
 
         if (!s->alive) continue;
 
-        /* Derived damage effects */
-
-        /* RADAR compartment → radar effectiveness */
         double r_int = s->compartments[COMP_RADAR].integrity;
         s->radar_effectiveness = r_int > 0.5 ? 1.0 : 0.5 + r_int;
         if (s->radar_effectiveness < 0.3) s->radar_effectiveness = 0.3;
-        s->search_radar.range_nm =
-            s->base_max_speed_kts > 0 ? /* reuse to avoid adding another field */
-            s->search_radar.range_nm : s->search_radar.range_nm; /* placeholder */
 
-        /* BRIDGE compartment → targeting effectiveness */
+        /* HARM damage: if radar compartment badly hit, shut down radar */
+        if (r_int < 0.3) {
+            s->search_radar.emitting = 0;
+            s->fire_control_radar.emitting = 0;
+        }
+
         double b_int = s->compartments[COMP_BRIDGE].integrity;
         s->targeting_effectiveness = b_int > 0.5 ? 1.0 : 0.4 + b_int;
         if (s->targeting_effectiveness < 0.3) s->targeting_effectiveness = 0.3;
 
-        /* ENGINE compartment → speed */
         double e_int = s->compartments[COMP_ENGINE].integrity;
         if (e_int < 0.5) {
             s->speed_reduced = 1;
@@ -1588,11 +2016,15 @@ static void phase_damage_consequences(int tick) {
             if (s->speed_kts > s->max_speed_kts) s->speed_kts = s->max_speed_kts;
         }
 
-        /* FORWARD/AFT weapons mounts */
+        /* Comms damage degrades Link-16 */
+        double c_int = s->compartments[COMP_COMMS].integrity;
+        if (c_int < 0.5) {
+            s->has_link16 = 0;
+        }
+
         s->fwd_weapons_disabled = (s->compartments[COMP_FORWARD_WEAPONS].integrity < 0.2);
         s->aft_weapons_disabled = (s->compartments[COMP_AFT_WEAPONS].integrity < 0.2);
 
-        /* Flooding → progressive effects */
         double capsize_threshold = s->max_hp * 2.5;
         if (s->flooding_total > 200) {
             double flood_pct = s->flooding_total / capsize_threshold;
@@ -1602,11 +2034,9 @@ static void phase_damage_consequences(int tick) {
             s->list_angle = flood_pct * 20.0;
         }
 
-        /* Capsize check */
         if (s->flooding_total > capsize_threshold) {
-            printf("  " ANSI_BOLD ANSI_RED "[CAPSIZE]" ANSI_RESET
-                   " %s capsizes! (%.0f tons ingress)\n",
-                   s->name, s->flooding_total);
+            evt_log(tick, CP_ALERT, "[CAPSIZE] %s capsizes! (%.0f tons)",
+                    s->name, s->flooding_total);
             s->alive = 0;
             stat_capsized[s->side]++;
             log_event(tick, "flooding", s->name, "flooding",
@@ -1615,114 +2045,444 @@ static void phase_damage_consequences(int tick) {
     }
 }
 
-/* ── Status Display ──────────────────────────────────────── */
-static void print_status_board(int tick) {
-    printf("\n" ANSI_BOLD "════════════════════════════════════════════════════════\n");
-    printf("  NAVSIM TACTICAL  T+%02d:%02d  Sea State %d (%s)\n",
-           tick/60, tick%60, sea_state, beaufort_names[sea_state]);
-    printf("════════════════════════════════════════════════════════\n" ANSI_RESET);
+/* ── TUI Setup and Drawing ──────────────────────────────── */
+static int tui_cols = 0, tui_rows = 0;
+static int map_w = 0, map_h = 0;
+static int log_w = 0, log_h = 0;
 
-    for (int side = 0; side <= 1; side++) {
-        const char *col = (side==0) ? ANSI_GREEN : ANSI_RED;
-        printf(" %s%s%s FORCES\n", ANSI_BOLD, col, side==0?"NATO":"PACT");
-        printf(ANSI_RESET);
-        printf(" %-20s %-5s %5s %8s %6s %6s %5s %5s\n",
-               "Ship","Class","HP%","Pos","Kts","Flood","Kills","Ammo");
-        printf(" " ANSI_DIM "─────────────────────────────────────────────────────\n" ANSI_RESET);
-
-        for (int i = 0; i < num_ships; i++) {
-            Ship *s = &ships[i];
-            if ((int)s->side != side) continue;
-            int total_ammo = 0;
-            for (int w = 0; w < s->num_weapons; w++) total_ammo += s->weapons[w].ammo;
-            double hp_pct = s->max_hp>0 ? (s->hp/s->max_hp)*100 : 0;
-            const char *sc = ANSI_RESET;
-            if (!s->alive) sc=ANSI_DIM;
-            else if (hp_pct < 30) sc=ANSI_RED;
-            else if (hp_pct < 60) sc=ANSI_YELLOW;
-
-            char sorties_buf[16]="";
-            if (s->max_sorties>0)
-                snprintf(sorties_buf,sizeof(sorties_buf)," [%d/%dS]",
-                         s->sorties_in_flight, s->max_sorties);
-
-            printf(" %s%-20s %-5s %4.0f%% %3.0f,%3.0f %5.0f %6.0f %5d %5d%s%s\n",
-                   sc, s->name, class_str(s->ship_class),
-                   hp_pct, s->x, s->y, s->speed_kts, s->flooding_total,
-                   s->kills, total_ammo, sorties_buf, ANSI_RESET);
+static void tui_init(void) {
+    setlocale(LC_ALL, "");
+#ifdef _WIN32
+    /* Enable VT processing for Windows Terminal */
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD mode = 0;
+        if (GetConsoleMode(hOut, &mode)) {
+            mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(hOut, mode);
         }
-        printf("\n");
+    }
+    SetConsoleOutputCP(65001);
+    SetConsoleCP(65001);
+#endif
+    initscr();
+    cbreak();
+    noecho();
+    curs_set(0);
+    nodelay(stdscr, TRUE);
+    keypad(stdscr, TRUE);
+
+    if (has_colors()) {
+        start_color();
+        use_default_colors();
+        init_pair(CP_NATO,     COLOR_GREEN,  -1);
+        init_pair(CP_PACT,     COLOR_RED,    -1);
+        init_pair(CP_HEADER,   COLOR_CYAN,   -1);
+        init_pair(CP_ALERT,    COLOR_RED,    -1);
+        init_pair(CP_DIM,      COLOR_WHITE,  -1);
+        init_pair(CP_CYAN,     COLOR_CYAN,   -1);
+        init_pair(CP_MAGENTA,  COLOR_MAGENTA,-1);
+        init_pair(CP_YELLOW,   COLOR_YELLOW, -1);
+        init_pair(CP_WHITE,    COLOR_WHITE,  -1);
+        init_pair(CP_MAP_BG,   COLOR_BLUE,   -1);
+        init_pair(CP_MAP_NATO, COLOR_GREEN,  -1);
+        init_pair(CP_MAP_PACT, COLOR_RED,    -1);
+        init_pair(CP_MAP_DEAD, COLOR_RED,    -1);
+        init_pair(CP_MAP_PROJ, COLOR_YELLOW, -1);
+        init_pair(CP_MAP_AIR,  COLOR_CYAN,   -1);
+        init_pair(CP_BORDER,   COLOR_CYAN,   -1);
+    }
+
+    getmaxyx(stdscr, tui_rows, tui_cols);
+
+    /* Layout:
+     * Row 0-2: Header (full width)
+     * Row 3 to (rows-12): Left 60% = Map, Right 40% = Event Log
+     * Bottom 11 rows: Left = NATO status, Middle = PACT status, Right = Stats
+     */
+    int header_h = 3;
+    int bottom_h = 12;
+    int mid_h = tui_rows - header_h - bottom_h;
+    if (mid_h < 10) mid_h = 10;
+
+    map_w = tui_cols * 60 / 100;
+    if (map_w > tui_cols - 40) map_w = tui_cols - 40;
+    map_h = mid_h;
+
+    log_w = tui_cols - map_w;
+    log_h = mid_h;
+
+    int bottom_w1 = tui_cols / 3;
+    int bottom_w2 = tui_cols / 3;
+    int bottom_w3 = tui_cols - bottom_w1 - bottom_w2;
+
+    win_header = newwin(header_h, tui_cols, 0, 0);
+    win_map    = newwin(map_h, map_w, header_h, 0);
+    win_log    = newwin(log_h, log_w, header_h, map_w);
+    win_nato   = newwin(bottom_h, bottom_w1, header_h + mid_h, 0);
+    win_pact   = newwin(bottom_h, bottom_w2, header_h + mid_h, bottom_w1);
+    win_stats  = newwin(bottom_h, bottom_w3, header_h + mid_h, bottom_w1 + bottom_w2);
+
+    pan_header = new_panel(win_header);
+    pan_map    = new_panel(win_map);
+    pan_log    = new_panel(win_log);
+    pan_nato   = new_panel(win_nato);
+    pan_pact   = new_panel(win_pact);
+    pan_stats  = new_panel(win_stats);
+}
+
+static void tui_cleanup(void) {
+    del_panel(pan_header);
+    del_panel(pan_map);
+    del_panel(pan_log);
+    del_panel(pan_nato);
+    del_panel(pan_pact);
+    del_panel(pan_stats);
+    delwin(win_header);
+    delwin(win_map);
+    delwin(win_log);
+    delwin(win_nato);
+    delwin(win_pact);
+    delwin(win_stats);
+    endwin();
+}
+
+static void draw_header(int tick) {
+    werase(win_header);
+    wattron(win_header, COLOR_PAIR(CP_HEADER) | A_BOLD);
+    mvwprintw(win_header, 0, 1,
+              " NAVSIM v4.0 | Atlantic PoI 24.19N 43.37W | T+%02d:%02d | SS%d %s | Seed:%u",
+              tick/60, tick%60, sea_state, beaufort_names[sea_state], g_seed);
+    wattroff(win_header, COLOR_PAIR(CP_HEADER) | A_BOLD);
+
+    /* Feature bar */
+    wattron(win_header, COLOR_PAIR(CP_DIM));
+    mvwprintw(win_header, 1, 1,
+              " Link-16/CEC | HARM/SEAD | A2A Combat | Helo ASW | Freq Hop | Comms Jam | Layered AD");
+    wattroff(win_header, COLOR_PAIR(CP_DIM));
+
+    /* Horizontal separator */
+    wattron(win_header, COLOR_PAIR(CP_BORDER));
+    mvwhline(win_header, 2, 0, ACS_HLINE, tui_cols);
+    wattroff(win_header, COLOR_PAIR(CP_BORDER));
+}
+
+static void draw_map(void) {
+    werase(win_map);
+    int mw = map_w - 2; /* inner width */
+    int mh = map_h - 2; /* inner height */
+
+    /* Border */
+    wattron(win_map, COLOR_PAIR(CP_BORDER));
+    box(win_map, 0, 0);
+    mvwprintw(win_map, 0, 2, " TACTICAL PLOT %dx%d NM ", GRID_SIZE, GRID_SIZE);
+    wattroff(win_map, COLOR_PAIR(CP_BORDER));
+
+    /* Draw grid dots */
+    wattron(win_map, COLOR_PAIR(CP_MAP_BG) | A_DIM);
+    for (int r = 1; r <= mh; r++) {
+        for (int c = 1; c <= mw; c++) {
+            if (r % 4 == 0 && c % 8 == 0)
+                mvwaddch(win_map, r, c, '+');
+            else
+                mvwaddch(win_map, r, c, ' ');
+        }
+    }
+    wattroff(win_map, COLOR_PAIR(CP_MAP_BG) | A_DIM);
+
+    /* Draw projectiles */
+    wattron(win_map, COLOR_PAIR(CP_MAP_PROJ));
+    for (int p = 0; p < num_projectiles; p++) {
+        if (!projectiles[p].active) continue;
+        int c = 1 + (int)(projectiles[p].x * mw / GRID_SIZE);
+        int r = mh - (int)(projectiles[p].y * mh / GRID_SIZE);
+        if (c < 1) c = 1; if (c > mw) c = mw;
+        if (r < 1) r = 1; if (r > mh) r = mh;
+        mvwaddch(win_map, r, c, projectiles[p].is_torpedo ? '~' : '*');
+    }
+    wattroff(win_map, COLOR_PAIR(CP_MAP_PROJ));
+
+    /* Draw aircraft sorties */
+    for (int i = 0; i < num_ships; i++) {
+        Ship *s = &ships[i];
+        if (!s->alive) continue;
+        int cpair = (s->side == SIDE_NATO) ? CP_MAP_NATO : CP_MAP_PACT;
+
+        /* Carrier sorties */
+        for (int j = 0; j < MAX_SORTIES; j++) {
+            AircraftSortie *sr = &s->sorties[j];
+            if (!sr->active || sr->destroyed) continue;
+            int c = 1 + (int)(sr->x * mw / GRID_SIZE);
+            int r = mh - (int)(sr->y * mh / GRID_SIZE);
+            if (c < 1) c = 1; if (c > mw) c = mw;
+            if (r < 1) r = 1; if (r > mh) r = mh;
+            wattron(win_map, COLOR_PAIR(CP_MAP_AIR));
+            char ac = '^';
+            if (sr->type == SORTIE_STRIKE) ac = '!';
+            else if (sr->type == SORTIE_ASW) ac = 'w';
+            else if (sr->type == SORTIE_AEW) ac = 'E';
+            mvwaddch(win_map, r, c, ac);
+            wattroff(win_map, COLOR_PAIR(CP_MAP_AIR));
+        }
+
+        /* Helo sorties */
+        for (int j = 0; j < 4; j++) {
+            AircraftSortie *h = &s->helo_sorties[j];
+            if (!h->active) continue;
+            int c = 1 + (int)(h->x * mw / GRID_SIZE);
+            int r = mh - (int)(h->y * mh / GRID_SIZE);
+            if (c < 1) c = 1; if (c > mw) c = mw;
+            if (r < 1) r = 1; if (r > mh) r = mh;
+            wattron(win_map, COLOR_PAIR(cpair));
+            mvwaddch(win_map, r, c, 'h');
+            wattroff(win_map, COLOR_PAIR(cpair));
+        }
+    }
+
+    /* Draw ships */
+    for (int i = 0; i < num_ships; i++) {
+        Ship *s = &ships[i];
+        int c = 1 + (int)(s->x * mw / GRID_SIZE);
+        int r = mh - (int)(s->y * mh / GRID_SIZE);
+        if (c < 1) c = 1; if (c > mw) c = mw;
+        if (r < 1) r = 1; if (r > mh) r = mh;
+
+        if (!s->alive) {
+            wattron(win_map, COLOR_PAIR(CP_MAP_DEAD) | A_DIM);
+            mvwaddch(win_map, r, c, 'X');
+            wattroff(win_map, COLOR_PAIR(CP_MAP_DEAD) | A_DIM);
+        } else {
+            int cpair = (s->side == SIDE_NATO) ? CP_MAP_NATO : CP_MAP_PACT;
+            int attr = A_BOLD;
+            double hp_pct = s->hp / s->max_hp;
+            if (hp_pct < 0.3) attr |= A_BLINK;
+
+            char sym;
+            switch (s->ship_class) {
+                case CLASS_CARRIER:    sym = (s->side==SIDE_NATO)?'A':'a'; break;
+                case CLASS_CRUISER:    sym = (s->side==SIDE_NATO)?'C':'c'; break;
+                case CLASS_DESTROYER:  sym = (s->side==SIDE_NATO)?'D':'d'; break;
+                case CLASS_FRIGATE:    sym = (s->side==SIDE_NATO)?'F':'f'; break;
+                case CLASS_CORVETTE:   sym = (s->side==SIDE_NATO)?'V':'v'; break;
+                case CLASS_SUBMARINE:  sym = (s->side==SIDE_NATO)?'S':'s'; break;
+                case CLASS_MISSILE_BOAT: sym = (s->side==SIDE_NATO)?'M':'m'; break;
+                default:               sym = (s->side==SIDE_NATO)?'?':'?'; break;
+            }
+
+            wattron(win_map, COLOR_PAIR(cpair) | attr);
+            mvwaddch(win_map, r, c, sym);
+            wattroff(win_map, COLOR_PAIR(cpair) | attr);
+
+            /* Ship name label (abbreviated) */
+            if (s->ship_class <= CLASS_CRUISER || s->ship_class == CLASS_SUBMARINE) {
+                char label[12];
+                snprintf(label, sizeof(label), "%.8s", s->name);
+                wattron(win_map, COLOR_PAIR(cpair) | A_DIM);
+                if (c + 2 + (int)strlen(label) <= mw)
+                    mvwprintw(win_map, r, c + 1, " %s", label);
+                wattroff(win_map, COLOR_PAIR(cpair) | A_DIM);
+            }
+        }
+    }
+
+    /* Legend */
+    int ly = mh;
+    wattron(win_map, COLOR_PAIR(CP_DIM));
+    mvwprintw(win_map, ly, 1,
+              "A/a=CV C/c=CG D/d=DD F/f=FF S/s=SS M/m=PGG ^=CAP !=STK h=Helo *=Missile ~=Torp");
+    wattroff(win_map, COLOR_PAIR(CP_DIM));
+}
+
+static void draw_event_log(void) {
+    werase(win_log);
+    wattron(win_log, COLOR_PAIR(CP_BORDER));
+    box(win_log, 0, 0);
+    mvwprintw(win_log, 0, 2, " EVENT LOG ");
+    wattroff(win_log, COLOR_PAIR(CP_BORDER));
+
+    int inner_h = log_h - 2;
+    int inner_w = log_w - 2;
+    int start = 0;
+    if (event_log_count > inner_h)
+        start = event_log_count - inner_h;
+
+    for (int i = start; i < event_log_count; i++) {
+        int idx = (event_log_head + i) % MAX_EVENTS;
+        int row = 1 + (i - start);
+        if (row >= log_h - 1) break;
+
+        wattron(win_log, COLOR_PAIR(CP_DIM));
+        mvwprintw(win_log, row, 1, "%02d:%02d ",
+                  event_log[idx].tick / 60, event_log[idx].tick % 60);
+        wattroff(win_log, COLOR_PAIR(CP_DIM));
+
+        wattron(win_log, COLOR_PAIR(event_log[idx].color_pair));
+        /* Truncate to fit */
+        char buf[256];
+        snprintf(buf, inner_w - 6, "%s", event_log[idx].text);
+        wprintw(win_log, "%s", buf);
+        wattroff(win_log, COLOR_PAIR(event_log[idx].color_pair));
     }
 }
 
-static void print_tactical_map(void) {
-    const int W=60, H=30;
-    char map[30][61];
-    for (int r=0;r<H;r++){for(int c=0;c<W;c++)map[r][c]='.';map[r][W]='\0';}
-    for (int i=0;i<num_ships;i++){
-        Ship *s=&ships[i];
-        int c=(int)(s->x*W/GRID_SIZE), r=H-1-(int)(s->y*H/GRID_SIZE);
-        if(c<0)c=0;if(c>=W)c=W-1;if(r<0)r=0;if(r>=H)r=H-1;
-        if(!s->alive) map[r][c]='X';
-        else if(s->side==SIDE_NATO) map[r][c]="AGDFSU"[s->ship_class];
-        else                        map[r][c]="agdfsu"[s->ship_class];
+static void draw_ship_panel(WINDOW *win, int side, int w, int h) {
+    werase(win);
+    wattron(win, COLOR_PAIR(CP_BORDER));
+    box(win, 0, 0);
+    wattroff(win, COLOR_PAIR(CP_BORDER));
+
+    int cpair = (side == SIDE_NATO) ? CP_NATO : CP_PACT;
+    const char *title = (side == SIDE_NATO) ? " NATO FORCES " : " PACT FORCES ";
+    wattron(win, COLOR_PAIR(cpair) | A_BOLD);
+    mvwprintw(win, 0, 2, "%s", title);
+    wattroff(win, COLOR_PAIR(cpair) | A_BOLD);
+
+    int inner_w = w - 2;
+    (void)inner_w;
+
+    /* Column headers */
+    wattron(win, A_BOLD);
+    mvwprintw(win, 1, 1, "%-16s %3s %4s %5s %3s %4s %3s", "Ship", "Cls", "HP%", "Flood", "Kts", "Ammo", "K");
+    wattroff(win, A_BOLD);
+
+    int row = 2;
+    for (int i = 0; i < num_ships && row < h - 1; i++) {
+        Ship *s = &ships[i];
+        if ((int)s->side != side) continue;
+
+        int total_ammo = 0;
+        for (int ww = 0; ww < s->num_weapons; ww++) total_ammo += s->weapons[ww].ammo;
+        double hp_pct = s->max_hp > 0 ? (s->hp / s->max_hp) * 100 : 0;
+
+        int sc = CP_WHITE;
+        if (!s->alive) sc = CP_DIM;
+        else if (hp_pct < 30) sc = CP_ALERT;
+        else if (hp_pct < 60) sc = CP_YELLOW;
+        else sc = cpair;
+
+        wattron(win, COLOR_PAIR(sc));
+        char name_buf[17];
+        snprintf(name_buf, sizeof(name_buf), "%.16s", s->name);
+
+        char extra[16] = "";
+        if (s->max_sorties > 0)
+            snprintf(extra, sizeof(extra), "[%d/%dA]", s->sorties_in_flight, s->max_sorties);
+        else if (s->helo_capacity > 0)
+            snprintf(extra, sizeof(extra), "[%dH]", s->helos_in_flight);
+
+        mvwprintw(win, row, 1, "%-16s %3s %3.0f%% %5.0f %3.0f %4d %2d %s",
+                  name_buf, class_str(s->ship_class),
+                  hp_pct, s->flooding_total, s->speed_kts,
+                  total_ammo, s->kills, extra);
+        wattroff(win, COLOR_PAIR(sc));
+        row++;
     }
-    printf(ANSI_BOLD " TACTICAL PLOT\n" ANSI_RESET);
-    printf(" ┌"); for(int c=0;c<W;c++)printf("─"); printf("┐\n");
-    for(int r=0;r<H;r++){
-        printf(" │");
-        for(int c=0;c<W;c++){
-            char ch=map[r][c];
-            if(ch=='.') printf(ANSI_DIM "·" ANSI_RESET);
-            else if(ch=='X') printf(ANSI_RED "✕" ANSI_RESET);
-            else if(ch>='A'&&ch<='Z') printf(ANSI_GREEN "%c" ANSI_RESET,ch);
-            else printf(ANSI_RED "%c" ANSI_RESET,ch);
-        }
-        printf("│\n");
+}
+
+static void draw_stats(int tick) {
+    werase(win_stats);
+    int sh;
+    int sw;
+    getmaxyx(win_stats, sh, sw);
+    (void)sw;
+    wattron(win_stats, COLOR_PAIR(CP_BORDER));
+    box(win_stats, 0, 0);
+    mvwprintw(win_stats, 0, 2, " BATTLE STATS ");
+    wattroff(win_stats, COLOR_PAIR(CP_BORDER));
+
+    int row = 1;
+    wattron(win_stats, COLOR_PAIR(CP_NATO) | A_BOLD);
+    mvwprintw(win_stats, row++, 1, "NATO");
+    wattroff(win_stats, COLOR_PAIR(CP_NATO) | A_BOLD);
+
+    wattron(win_stats, COLOR_PAIR(CP_WHITE));
+    mvwprintw(win_stats, row++, 1, "Launches:%d Hit:%d", stat_launches[0], stat_hits[0]);
+    mvwprintw(win_stats, row++, 1, "SAM:%d CIWS:%d Chaff:%d",
+              stat_sam_intercepts[0], stat_ciws_intercepts[0], stat_chaff_seductions[0]);
+    mvwprintw(win_stats, row++, 1, "Air:%d A2A:%d HARM:%d Helo:%d",
+              stat_air_strikes[0], stat_a2a_kills[0], stat_harm_hits[0], stat_helo_asw[0]);
+    wattroff(win_stats, COLOR_PAIR(CP_WHITE));
+
+    row++;
+    wattron(win_stats, COLOR_PAIR(CP_PACT) | A_BOLD);
+    mvwprintw(win_stats, row++, 1, "PACT");
+    wattroff(win_stats, COLOR_PAIR(CP_PACT) | A_BOLD);
+
+    wattron(win_stats, COLOR_PAIR(CP_WHITE));
+    if (row < sh - 1) mvwprintw(win_stats, row++, 1, "Launches:%d Hit:%d", stat_launches[1], stat_hits[1]);
+    if (row < sh - 1) mvwprintw(win_stats, row++, 1, "SAM:%d CIWS:%d Chaff:%d",
+              stat_sam_intercepts[1], stat_ciws_intercepts[1], stat_chaff_seductions[1]);
+    if (row < sh - 1) mvwprintw(win_stats, row++, 1, "Air:%d A2A:%d Jammed:%d",
+              stat_air_strikes[1], stat_a2a_kills[1], stat_comms_jammed[1]);
+    wattroff(win_stats, COLOR_PAIR(CP_WHITE));
+
+    if (row < sh - 1) {
+        wattron(win_stats, COLOR_PAIR(CP_DIM));
+        mvwprintw(win_stats, row++, 1, "T+%02d:%02d Proj:%d", tick/60, tick%60, num_projectiles);
+        wattroff(win_stats, COLOR_PAIR(CP_DIM));
     }
-    printf(" └"); for(int c=0;c<W;c++)printf("─"); printf("┘\n");
+}
+
+static void tui_draw(int tick) {
+    draw_header(tick);
+    draw_map();
+    draw_event_log();
+    int nw, nh;
+    getmaxyx(win_nato, nh, nw);
+    draw_ship_panel(win_nato, SIDE_NATO, nw, nh);
+    int pw, ph;
+    getmaxyx(win_pact, ph, pw);
+    draw_ship_panel(win_pact, SIDE_PACT, pw, ph);
+    draw_stats(tick);
+    update_panels();
+    doupdate();
 }
 
 /* ── Write CSV ───────────────────────────────────────────── */
 static void write_csv(void) {
     FILE *f = fopen(LOG_FILE, "w");
-    if (!f) { perror("fopen"); return; }
+    if (!f) { return; }
     const char *evt_names[]={"hit","miss","ciws_intercept","sam_intercept",
                               "chaff_seduce","air_strike","asw_attack",
-                              "torpedo_decoy","capsize"};
+                              "torpedo_decoy","capsize","air_to_air",
+                              "harm_strike","link16_share","comms_jam"};
     fprintf(f,"tick,time,attacker,defender,weapon,hits,damage,"
               "defender_hp_after,kill,event_type,sea_state\n");
     for (int i=0;i<num_records;i++){
         EngagementRecord *r=&records[i];
+        const char *ename = (r->event_type < 13) ? evt_names[r->event_type] : "unknown";
         fprintf(f,"%d,%02d:%02d,%s,%s,%s,%d,%.1f,%.1f,%d,%s,%d\n",
                 r->tick, r->tick/60, r->tick%60,
                 r->attacker, r->defender, r->weapon,
                 r->hit, r->damage, r->defender_hp_after, r->kill,
-                evt_names[r->event_type], r->sea_state);
+                ename, r->sea_state);
     }
     fclose(f);
 
     FILE *f2 = fopen("ship_status.csv","w");
     if(f2){
         fprintf(f2,"name,side,class,hp,max_hp,alive,kills,damage_dealt,"
-                   "flooding_total,capsized,sorties_flown,final_x,final_y\n");
+                   "flooding_total,capsized,sorties_flown,helo_sorties,final_x,final_y\n");
         for(int i=0;i<num_ships;i++){
             Ship *s=&ships[i];
             int sorties_flown=0;
             for(int j=0;j<MAX_SORTIES;j++)
                 if(s->sorties[j].launch_tick>0) sorties_flown++;
-            fprintf(f2,"%s,%s,%s,%.0f,%.0f,%d,%d,%d,%.1f,%d,%d,%.1f,%.1f\n",
+            int helo_flown=0;
+            for(int j=0;j<4;j++)
+                if(s->helo_sorties[j].launch_tick>0) helo_flown++;
+            fprintf(f2,"%s,%s,%s,%.0f,%.0f,%d,%d,%d,%.1f,%d,%d,%d,%.1f,%.1f\n",
                     s->name, side_str(s->side), class_str(s->ship_class),
                     s->hp, s->max_hp, s->alive, s->kills,
                     s->damage_dealt_total, s->flooding_total,
                     stat_capsized[s->side]>0&&!s->alive?1:0,
-                    sorties_flown, s->x, s->y);
+                    sorties_flown, helo_flown, s->x, s->y);
         }
         fclose(f2);
     }
 }
 
-/* ── After-Action Report ─────────────────────────────────── */
+/* ── After-Action Report (printed after ncurses cleanup) ── */
 static void assess_victory(void) {
     int na=0,pa=0; double nhp=0,php=0,nmax=0,pmax=0;
     for(int i=0;i<num_ships;i++){
@@ -1730,21 +2490,20 @@ static void assess_victory(void) {
         if(s->side==SIDE_NATO){ nmax+=s->max_hp; if(s->alive){na++;nhp+=s->hp;} }
         else                  { pmax+=s->max_hp; if(s->alive){pa++;php+=s->hp;} }
     }
-    printf("\n" ANSI_BOLD
-           "══════════════════════════════════════════════════════════════════════════════\n"
-           "  AFTER-ACTION REPORT\n"
-           "══════════════════════════════════════════════════════════════════════════════\n"
-           ANSI_RESET);
-    printf("  " ANSI_GREEN "NATO:" ANSI_RESET " %d ships, %.0f/%.0f HP (%.0f%%)\n",
+    printf("\n\033[1m\033[36m");
+    printf("==========================================================================\n");
+    printf("  NAVSIM v4.0 AFTER-ACTION REPORT\n");
+    printf("==========================================================================\n");
+    printf("\033[0m");
+    printf("  \033[32mNATO:\033[0m %d ships, %.0f/%.0f HP (%.0f%%)\n",
            na,nhp,nmax,nmax>0?nhp/nmax*100:0);
-    printf("  " ANSI_RED   "PACT:" ANSI_RESET " %d ships, %.0f/%.0f HP (%.0f%%)\n",
+    printf("  \033[31mPACT:\033[0m %d ships, %.0f/%.0f HP (%.0f%%)\n",
            pa,php,pmax,pmax>0?php/pmax*100:0);
 
-    double ns = (nhp/nmax)*100 + (pmax-php);
-    double ps = (php/pmax)*100 + (nmax-nhp);
+    double ns = (nhp/fmax(nmax,1))*100 + (pmax-php);
+    double ps = (php/fmax(pmax,1))*100 + (nmax-nhp);
     printf("\n  Combat Score: NATO %.0f | PACT %.0f\n", ns, ps);
 
-    /* Damage breakdown */
     int dn=0,dp=0,kn=0,kp=0;
     for(int i=0;i<num_ships;i++){
         if(ships[i].side==SIDE_NATO){dn+=ships[i].damage_dealt_total;kn+=ships[i].kills;}
@@ -1752,71 +2511,53 @@ static void assess_victory(void) {
     }
     int ln=stat_launches[0],lp=stat_launches[1];
     int hn=stat_hits[0],hp2=stat_hits[1];
-    int mn=stat_misses[0],mp=stat_misses[1];
-    int ifn=ln-hn-mn, ifp=lp-hp2-mp;
 
-    printf("\n  Fires:\n");
-    printf("    NATO: launches=%d hits=%d (%.1f%%) misses=%d in-flight=%d\n",
-           ln,hn,ln>0?hn*100.0/ln:0,mn,ifn<0?0:ifn);
-    printf("          damage=%d  kills=%d  air_strikes=%d\n",
-           dn,kn,stat_air_strikes[0]);
-    printf("          SAM_intercepts=%d  CIWS_kills=%d  chaff=%d\n",
+    printf("\n  \033[32mNATO Fires:\033[0m\n");
+    printf("    launches=%d hits=%d (%.1f%%) damage=%d kills=%d\n",
+           ln,hn,ln>0?hn*100.0/ln:0,dn,kn);
+    printf("    SAM_intercepts=%d  CIWS_kills=%d  chaff=%d\n",
            stat_sam_intercepts[0],stat_ciws_intercepts[0],stat_chaff_seductions[0]);
-    printf("          torpedo_decoys=%d  ASW_attacks=%d  capsized=%d\n",
-           stat_torpedo_decoys[0],stat_asw_attacks[0],stat_capsized[0]);
+    printf("    air_strikes=%d  A2A_kills=%d  HARM_hits=%d  helo_ASW=%d\n",
+           stat_air_strikes[0],stat_a2a_kills[0],stat_harm_hits[0],stat_helo_asw[0]);
+    printf("    Link-16_shares=%d  freq_hops=%d  torpedo_decoys=%d\n",
+           stat_link16_shares[0],stat_freq_hops[0],stat_torpedo_decoys[0]);
 
-    printf("\n    PACT: launches=%d hits=%d (%.1f%%) misses=%d in-flight=%d\n",
-           lp,hp2,lp>0?hp2*100.0/lp:0,mp,ifp<0?0:ifp);
-    printf("          damage=%d  kills=%d  air_strikes=%d\n",
-           dp,kp,stat_air_strikes[1]);
-    printf("          SAM_intercepts=%d  CIWS_kills=%d  chaff=%d\n",
+    printf("\n  \033[31mPACT Fires:\033[0m\n");
+    printf("    launches=%d hits=%d (%.1f%%) damage=%d kills=%d\n",
+           lp,hp2,lp>0?hp2*100.0/lp:0,dp,kp);
+    printf("    SAM_intercepts=%d  CIWS_kills=%d  chaff=%d\n",
            stat_sam_intercepts[1],stat_ciws_intercepts[1],stat_chaff_seductions[1]);
-    printf("          torpedo_decoys=%d  ASW_attacks=%d  capsized=%d\n",
-           stat_torpedo_decoys[1],stat_asw_attacks[1],stat_capsized[1]);
+    printf("    air_strikes=%d  A2A_kills=%d  comms_jammed=%d  helo_ASW=%d\n",
+           stat_air_strikes[1],stat_a2a_kills[1],stat_comms_jammed[1],stat_helo_asw[1]);
 
     printf("\n  Weather: final sea state %d (%s)\n",sea_state,beaufort_names[sea_state]);
 
     const char *result;
-    if      (na==0&&pa==0)       result=ANSI_YELLOW "MUTUAL DESTRUCTION";
-    else if (ns > ps*1.5)        result=ANSI_GREEN   "DECISIVE NATO VICTORY";
-    else if (ps > ns*1.5)        result=ANSI_RED     "DECISIVE PACT VICTORY";
-    else if (ns > ps)            result=ANSI_GREEN   "MARGINAL NATO VICTORY";
-    else if (ps > ns)            result=ANSI_RED     "MARGINAL PACT VICTORY";
-    else                         result=ANSI_YELLOW  "DRAW";
-    printf("\n  " ANSI_BOLD "%s\n" ANSI_RESET, result);
-    printf("\n  Engagement data: %s\n  Ship status:     ship_status.csv\n", LOG_FILE);
+    if      (na==0&&pa==0)       result="\033[33mMUTUAL DESTRUCTION";
+    else if (ns > ps*1.5)        result="\033[32mDECISIVE NATO VICTORY";
+    else if (ps > ns*1.5)        result="\033[31mDECISIVE PACT VICTORY";
+    else if (ns > ps)            result="\033[32mMARGINAL NATO VICTORY";
+    else if (ps > ns)            result="\033[31mMARGINAL PACT VICTORY";
+    else                         result="\033[33mDRAW";
+    printf("\n  \033[1m%s\033[0m\n", result);
+    printf("\n  Engagement data: %s\n  Ship status:     ship_status.csv\n\n", LOG_FILE);
 }
 
 /* ── Main ────────────────────────────────────────────────── */
 int main(int argc, char **argv) {
-    setup_console();
+    g_seed = (uint32_t)time(NULL);
+    if (argc > 1) g_seed = (uint32_t)atoi(argv[1]);
+    rng_seed(g_seed);
 
-    uint32_t seed = (uint32_t)time(NULL);
-    if (argc > 1) seed = (uint32_t)atoi(argv[1]);
-    rng_seed(seed);
-
-    printf(ANSI_BOLD ANSI_CYAN
-    "\n"
-    "    ███╗   ██╗ █████╗ ██╗   ██╗███████╗██╗███╗   ███╗\n"
-    "    ████╗  ██║██╔══██╗██║   ██║██╔════╝██║████╗ ████║\n"
-    "    ██╔██╗ ██║███████║██║   ██║███████╗██║██╔████╔██║\n"
-    "    ██║╚██╗██║██╔══██║╚██╗ ██╔╝╚════██║██║██║╚██╔╝██║\n"
-    "    ██║ ╚████║██║  ██║ ╚████╔╝ ███████║██║██║ ╚═╝ ██║\n"
-    "    ╚═╝  ╚═══╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝╚═╝     ╚═╝\n"
-    ANSI_RESET ANSI_DIM
-    "    v3.0 | Atlantic Pole of Inaccessibility 24.1851°N 43.3704°W\n"
-    "    Deep-ocean engagement. No land within 2034 km. RNG Seed: %u\n"
-    ANSI_RESET "\n", seed);
-
-    /* Load data */
+    /* Load data before TUI init (errors go to stderr) */
     load_weapons_csv("data/weapons.csv");
     if (num_wpn_templates == 0) {
-        fprintf(stderr, "[FATAL] No weapon templates loaded. Ensure data/weapons.csv exists.\n");
+        fprintf(stderr, "[FATAL] No weapon templates loaded.\n");
         return 1;
     }
     load_platforms_csv("data/platforms.csv");
     if (num_ships == 0) {
-        fprintf(stderr, "[FATAL] No ships loaded. Ensure data/platforms.csv exists.\n");
+        fprintf(stderr, "[FATAL] No ships loaded.\n");
         return 1;
     }
 
@@ -1825,44 +2566,57 @@ int main(int argc, char **argv) {
     sea_state_timer = 600 + (int)(rng_uniform() * 600);
     update_weather_factors();
 
-    printf(ANSI_BOLD "\n  SCENARIO: North Atlantic Battle Group Engagement\n" ANSI_RESET);
-    printf("  NATO: %d platforms loaded\n", num_ships);
-    for(int i=0;i<num_ships;i++)
-        if(ships[i].side==SIDE_NATO)
-            printf("    " ANSI_GREEN "%s" ANSI_RESET " (%s) %d wpns%s\n",
-                   ships[i].name, ships[i].hull_class, ships[i].num_weapons,
-                   ships[i].max_sorties>0?" [CARRIER]":"");
-    int pact_start=0;
-    for(int i=0;i<num_ships;i++) if(ships[i].side==SIDE_PACT){pact_start=i;break;}
-    printf("  PACT: %d platforms loaded\n", num_ships-pact_start);
-    for(int i=0;i<num_ships;i++)
-        if(ships[i].side==SIDE_PACT)
-            printf("    " ANSI_RED "%s" ANSI_RESET " (%s) %d wpns%s\n",
-                   ships[i].name, ships[i].hull_class, ships[i].num_weapons,
-                   ships[i].max_sorties>0?" [CARRIER]":"");
+    /* Initialize ncurses TUI */
+    tui_init();
 
-    printf("\n  Features: Layered air defense • Carrier aviation • Sonar/ASW\n");
-    printf("             CIWS intercept • Chaff/ECM • Compartment damage\n");
-    printf("             Weather SS%d (%s) • Torpedo decoys\n\n",
-           sea_state, beaufort_names[sea_state]);
+    /* Initial event log entries */
+    evt_log(0, CP_HEADER, "NAVSIM v4.0 Tactical Engagement Simulator");
+    evt_log(0, CP_HEADER, "Atlantic PoI 24.19N 43.37W | Seed: %u", g_seed);
+    evt_log(0, CP_CYAN, "Weather: SS%d (%s)", sea_state, beaufort_names[sea_state]);
 
-    print_status_board(0);
-    print_tactical_map();
-    printf(ANSI_BOLD "\n  ─── ENGAGEMENT BEGINS ───\n\n" ANSI_RESET);
+    int nato_count = 0, pact_count = 0;
+    for (int i = 0; i < num_ships; i++) {
+        if (ships[i].side == SIDE_NATO) nato_count++;
+        else pact_count++;
+    }
+    evt_log(0, CP_NATO, "NATO: %d platforms loaded", nato_count);
+    evt_log(0, CP_PACT, "PACT: %d platforms loaded", pact_count);
+    evt_log(0, CP_WHITE, "--- ENGAGEMENT BEGINS ---");
+
+    /* Draw initial state */
+    tui_draw(0);
 
     int battle_over = 0;
     for (int tick = 1; tick <= MAX_TICK && !battle_over; tick++) {
         phase_weather(tick);
         phase_detect(tick);
         phase_sonar(tick);
+        phase_c4isr(tick);
         phase_move(tick);
         phase_weapons(tick);
+        phase_air_to_air(tick);
+        phase_helicopters(tick);
         phase_aviation(tick);
         phase_damage_consequences(tick);
 
-        if (tick % 120 == 0) {
-            print_status_board(tick);
-            print_tactical_map();
+        /* Redraw TUI every 2 seconds of sim time (or every tick if you want smooth) */
+        if (tick % 2 == 0) {
+            tui_draw(tick);
+
+            /* Check for 'q' to quit early */
+            int ch = getch();
+            if (ch == 'q' || ch == 'Q') {
+                battle_over = 1;
+                evt_log(tick, CP_ALERT, "--- SIMULATION ABORTED BY USER ---");
+            }
+            /* Space to pause */
+            if (ch == ' ') {
+                nodelay(stdscr, FALSE);
+                mvwprintw(win_header, 1, tui_cols - 12, " [PAUSED] ");
+                wrefresh(win_header);
+                getch(); /* wait for any key */
+                nodelay(stdscr, TRUE);
+            }
         }
 
         int nu=0, pu=0;
@@ -1874,9 +2628,23 @@ int main(int argc, char **argv) {
         if (nu==0 || pu==0) battle_over=1;
     }
 
-    print_status_board(MAX_TICK);
-    print_tactical_map();
+    /* Final draw */
+    tui_draw(MAX_TICK);
+    evt_log(MAX_TICK, CP_HEADER, "--- ENGAGEMENT COMPLETE ---");
+    tui_draw(MAX_TICK);
+
+    /* Wait for keypress before exiting ncurses */
+    nodelay(stdscr, FALSE);
+    mvwprintw(win_header, 1, 1, " Press any key for after-action report...");
+    wrefresh(win_header);
+    getch();
+
+    /* Cleanup TUI */
+    tui_cleanup();
+
+    /* Write CSVs and print report to normal terminal */
     write_csv();
     assess_victory();
+
     return 0;
 }

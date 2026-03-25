@@ -1,11 +1,11 @@
-# NAVSIM - Cold War Naval Tactical Engagement Simulator
-# ────────────────────────────────────────────────────────
+# NAVSIM - Cold War Naval Tactical Engagement Simulator v4.0
+# ────────────────────────────────────────────────────────────
+# Requires: ncurses (ncursesw + panelw)
 # Linux/macOS:  make
-# Windows MSVC: cl /O2 navsim.c /Fe:navsim.exe
-# Windows GCC:  gcc -O2 -o navsim.exe navsim.c -lm
+# MSYS2/MinGW:  make  (install: pacman -S mingw-w64-ucrt-x86_64-ncurses)
 CC      = gcc
-CFLAGS  = -O2 -Wall -Wextra -pedantic -std=c11
-LDFLAGS = -lm
+CFLAGS  = -O2 -Wall -Wextra -pedantic -std=c11 $(shell pkg-config --cflags ncursesw 2>/dev/null || echo -DNCURSES_WIDECHAR)
+LDFLAGS = -lm $(shell pkg-config --libs ncursesw panelw 2>/dev/null || echo -lncursesw -lpanelw)
 TARGET  = navsim
 SRC     = navsim.c
 
