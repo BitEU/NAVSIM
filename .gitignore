@@ -1,3 +1,5 @@
 *.exe
 *.txt
 /.claude
+battle_log.csv
+ship_status.csv
