@@ -49,7 +49,7 @@
 /* ncurses */
 #define NCURSES_WIDECHAR 1
 #include <ncurses.h>
-#include <panel.h>
+/* panel.h removed — using plain wnoutrefresh/doupdate instead */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -387,12 +387,7 @@ static WINDOW *win_nato = NULL;
 static WINDOW *win_pact = NULL;
 static WINDOW *win_stats = NULL;
 static WINDOW *win_header = NULL;
-static PANEL  *pan_map = NULL;
-static PANEL  *pan_log = NULL;
-static PANEL  *pan_nato = NULL;
-static PANEL  *pan_pact = NULL;
-static PANEL  *pan_stats = NULL;
-static PANEL  *pan_header = NULL;
+/* no panels — using wnoutrefresh/doupdate */
 
 /* Color pairs */
 #define CP_NORMAL    0
@@ -979,7 +974,6 @@ static void phase_c4isr(int tick) {
     }
 
     /* PACT communications jamming degrades Link-16 */
-    double link16_effectiveness = 1.0;
     for (int i = 0; i < num_ships; i++) {
         if (!ships[i].alive || ships[i].side != SIDE_PACT) continue;
         if (ships[i].ecm_power_kw > 50) {
@@ -2093,6 +2087,9 @@ static void tui_init(void) {
         init_pair(CP_BORDER,   COLOR_CYAN,   -1);
     }
 
+    /* Must refresh stdscr before creating panels (ncurses 6.5 requirement) */
+    refresh();
+
     getmaxyx(stdscr, tui_rows, tui_cols);
 
     /* Layout:
@@ -2123,21 +2120,9 @@ static void tui_init(void) {
     win_pact   = newwin(bottom_h, bottom_w2, header_h + mid_h, bottom_w1);
     win_stats  = newwin(bottom_h, bottom_w3, header_h + mid_h, bottom_w1 + bottom_w2);
 
-    pan_header = new_panel(win_header);
-    pan_map    = new_panel(win_map);
-    pan_log    = new_panel(win_log);
-    pan_nato   = new_panel(win_nato);
-    pan_pact   = new_panel(win_pact);
-    pan_stats  = new_panel(win_stats);
 }
 
 static void tui_cleanup(void) {
-    del_panel(pan_header);
-    del_panel(pan_map);
-    del_panel(pan_log);
-    del_panel(pan_nato);
-    del_panel(pan_pact);
-    del_panel(pan_stats);
     delwin(win_header);
     delwin(win_map);
     delwin(win_log);
@@ -2434,7 +2419,12 @@ static void tui_draw(int tick) {
     getmaxyx(win_pact, ph, pw);
     draw_ship_panel(win_pact, SIDE_PACT, pw, ph);
     draw_stats(tick);
-    update_panels();
+    wnoutrefresh(win_header);
+    wnoutrefresh(win_map);
+    wnoutrefresh(win_log);
+    wnoutrefresh(win_nato);
+    wnoutrefresh(win_pact);
+    wnoutrefresh(win_stats);
     doupdate();
 }
 

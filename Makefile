@@ -5,7 +5,7 @@
 # MSYS2/MinGW:  make  (install: pacman -S mingw-w64-ucrt-x86_64-ncurses)
 CC      = gcc
 CFLAGS  = -O2 -Wall -Wextra -pedantic -std=c11 $(shell pkg-config --cflags ncursesw 2>/dev/null || echo -DNCURSES_WIDECHAR)
-LDFLAGS = -lm $(shell pkg-config --libs ncursesw panelw 2>/dev/null || echo -lncursesw -lpanelw)
+LDFLAGS = -lm $(shell pkg-config --libs ncursesw 2>/dev/null || echo -lncursesw)
 TARGET  = navsim
 SRC     = navsim.c
 
