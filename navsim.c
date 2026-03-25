@@ -407,6 +407,161 @@ static WINDOW *win_header = NULL;
 #define CP_MAP_PROJ 14
 #define CP_MAP_AIR  15
 #define CP_BORDER   16
+#define CP_SPEED    17
+#define CP_HELP_KEY 18
+#define CP_HELP_DESC 19
+#define CP_HP_HIGH  20
+#define CP_HP_MED   21
+#define CP_HP_LOW   22
+#define CP_TITLE_BAR 23
+#define CP_MODE_PLAY  24
+#define CP_MODE_PAUSE 25
+
+/* ── Playback / Speed Control ────────────────────────────── */
+typedef enum { MODE_PLAY, MODE_PAUSED } PlayMode;
+
+static PlayMode play_mode = MODE_PLAY;
+static int      sim_speed = 2;       /* index into speed tables */
+static int      view_snap_idx = -1;  /* -1 = live (latest) */
+static int      show_help = 0;
+
+static const int  speed_delays[] = { 200, 100, 50, 25, 10, 0 };
+static const char *speed_labels[] = {"0.25x","0.5x","1x","2x","4x","MAX"};
+#define NUM_SPEEDS 6
+
+/* ── Snapshot System ─────────────────────────────────────── */
+#define MAX_SNAPSHOTS 3600
+
+typedef struct {
+    int            tick;
+    /* Ships */
+    Ship           ships[MAX_SHIPS];
+    int            num_ships;
+    /* Projectiles */
+    Projectile     projectiles[MAX_PROJECTILES];
+    int            num_projectiles;
+    /* Event log */
+    EventLogEntry  event_log[MAX_EVENTS];
+    int            event_log_head;
+    int            event_log_count;
+    /* Weather */
+    int            sea_state;
+    int            sea_state_timer;
+    double         wx_radar, wx_small, wx_asw_helo, wx_ir;
+    /* RNG */
+    uint32_t       rng_state[4];
+    /* Engagement records count (for trimming on rewind) */
+    int            num_records;
+    /* Statistics (flat copy of all stat_ arrays) */
+    int            stat_launches[2];
+    int            stat_hits[2];
+    int            stat_misses[2];
+    int            stat_detect_opps[2];
+    int            stat_detect_success[2];
+    int            stat_detect_jammed[2];
+    int            stat_kills_by_side[2];
+    int            stat_ciws_intercepts[2];
+    int            stat_sam_intercepts[2];
+    int            stat_chaff_seductions[2];
+    int            stat_torpedo_decoys[2];
+    int            stat_air_strikes[2];
+    int            stat_asw_attacks[2];
+    int            stat_capsized[2];
+    int            stat_a2a_kills[2];
+    int            stat_harm_hits[2];
+    int            stat_link16_shares[2];
+    int            stat_comms_jammed[2];
+    int            stat_freq_hops[2];
+    int            stat_helo_asw[2];
+} Snapshot;
+
+static Snapshot *snapshots = NULL;
+static int       snap_count = 0;
+
+static void snap_save(int tick) {
+    if (!snapshots) return;
+    if (snap_count >= MAX_SNAPSHOTS) return; /* buffer full */
+    Snapshot *s = &snapshots[snap_count];
+    s->tick = tick;
+    memcpy(s->ships, ships, sizeof(ships));
+    s->num_ships = num_ships;
+    memcpy(s->projectiles, projectiles, sizeof(projectiles));
+    s->num_projectiles = num_projectiles;
+    memcpy(s->event_log, event_log, sizeof(event_log));
+    s->event_log_head = event_log_head;
+    s->event_log_count = event_log_count;
+    s->sea_state = sea_state;
+    s->sea_state_timer = sea_state_timer;
+    s->wx_radar = wx_radar;
+    s->wx_small = wx_small;
+    s->wx_asw_helo = wx_asw_helo;
+    s->wx_ir = wx_ir;
+    memcpy(s->rng_state, rng_state, sizeof(rng_state));
+    s->num_records = num_records;
+    /* Stats */
+    memcpy(s->stat_launches, stat_launches, sizeof(stat_launches));
+    memcpy(s->stat_hits, stat_hits, sizeof(stat_hits));
+    memcpy(s->stat_misses, stat_misses, sizeof(stat_misses));
+    memcpy(s->stat_detect_opps, stat_detect_opps, sizeof(stat_detect_opps));
+    memcpy(s->stat_detect_success, stat_detect_success, sizeof(stat_detect_success));
+    memcpy(s->stat_detect_jammed, stat_detect_jammed, sizeof(stat_detect_jammed));
+    memcpy(s->stat_kills_by_side, stat_kills_by_side, sizeof(stat_kills_by_side));
+    memcpy(s->stat_ciws_intercepts, stat_ciws_intercepts, sizeof(stat_ciws_intercepts));
+    memcpy(s->stat_sam_intercepts, stat_sam_intercepts, sizeof(stat_sam_intercepts));
+    memcpy(s->stat_chaff_seductions, stat_chaff_seductions, sizeof(stat_chaff_seductions));
+    memcpy(s->stat_torpedo_decoys, stat_torpedo_decoys, sizeof(stat_torpedo_decoys));
+    memcpy(s->stat_air_strikes, stat_air_strikes, sizeof(stat_air_strikes));
+    memcpy(s->stat_asw_attacks, stat_asw_attacks, sizeof(stat_asw_attacks));
+    memcpy(s->stat_capsized, stat_capsized, sizeof(stat_capsized));
+    memcpy(s->stat_a2a_kills, stat_a2a_kills, sizeof(stat_a2a_kills));
+    memcpy(s->stat_harm_hits, stat_harm_hits, sizeof(stat_harm_hits));
+    memcpy(s->stat_link16_shares, stat_link16_shares, sizeof(stat_link16_shares));
+    memcpy(s->stat_comms_jammed, stat_comms_jammed, sizeof(stat_comms_jammed));
+    memcpy(s->stat_freq_hops, stat_freq_hops, sizeof(stat_freq_hops));
+    memcpy(s->stat_helo_asw, stat_helo_asw, sizeof(stat_helo_asw));
+    snap_count++;
+}
+
+static void snap_restore(int idx) {
+    if (!snapshots || idx < 0 || idx >= snap_count) return;
+    const Snapshot *s = &snapshots[idx];
+    memcpy(ships, s->ships, sizeof(ships));
+    num_ships = s->num_ships;
+    memcpy(projectiles, s->projectiles, sizeof(projectiles));
+    num_projectiles = s->num_projectiles;
+    memcpy(event_log, s->event_log, sizeof(event_log));
+    event_log_head = s->event_log_head;
+    event_log_count = s->event_log_count;
+    sea_state = s->sea_state;
+    sea_state_timer = s->sea_state_timer;
+    wx_radar = s->wx_radar;
+    wx_small = s->wx_small;
+    wx_asw_helo = s->wx_asw_helo;
+    wx_ir = s->wx_ir;
+    memcpy(rng_state, s->rng_state, sizeof(rng_state));
+    num_records = s->num_records;
+    /* Stats */
+    memcpy(stat_launches, s->stat_launches, sizeof(stat_launches));
+    memcpy(stat_hits, s->stat_hits, sizeof(stat_hits));
+    memcpy(stat_misses, s->stat_misses, sizeof(stat_misses));
+    memcpy(stat_detect_opps, s->stat_detect_opps, sizeof(stat_detect_opps));
+    memcpy(stat_detect_success, s->stat_detect_success, sizeof(stat_detect_success));
+    memcpy(stat_detect_jammed, s->stat_detect_jammed, sizeof(stat_detect_jammed));
+    memcpy(stat_kills_by_side, s->stat_kills_by_side, sizeof(stat_kills_by_side));
+    memcpy(stat_ciws_intercepts, s->stat_ciws_intercepts, sizeof(stat_ciws_intercepts));
+    memcpy(stat_sam_intercepts, s->stat_sam_intercepts, sizeof(stat_sam_intercepts));
+    memcpy(stat_chaff_seductions, s->stat_chaff_seductions, sizeof(stat_chaff_seductions));
+    memcpy(stat_torpedo_decoys, s->stat_torpedo_decoys, sizeof(stat_torpedo_decoys));
+    memcpy(stat_air_strikes, s->stat_air_strikes, sizeof(stat_air_strikes));
+    memcpy(stat_asw_attacks, s->stat_asw_attacks, sizeof(stat_asw_attacks));
+    memcpy(stat_capsized, s->stat_capsized, sizeof(stat_capsized));
+    memcpy(stat_a2a_kills, s->stat_a2a_kills, sizeof(stat_a2a_kills));
+    memcpy(stat_harm_hits, s->stat_harm_hits, sizeof(stat_harm_hits));
+    memcpy(stat_link16_shares, s->stat_link16_shares, sizeof(stat_link16_shares));
+    memcpy(stat_comms_jammed, s->stat_comms_jammed, sizeof(stat_comms_jammed));
+    memcpy(stat_freq_hops, s->stat_freq_hops, sizeof(stat_freq_hops));
+    memcpy(stat_helo_asw, s->stat_helo_asw, sizeof(stat_helo_asw));
+}
 
 /* ── Event Log Helper ────────────────────────────────────── */
 static void evt_log(int tick, int cpair, const char *fmt, ...) {
@@ -2069,22 +2224,40 @@ static void tui_init(void) {
     if (has_colors()) {
         start_color();
         use_default_colors();
+
+        /* Try to define a custom dark navy background color (index 16) */
+        int ocean_bg = COLOR_BLUE;
+        if (can_change_color() && COLORS >= 17) {
+            init_color(16, 0, 0, 350);  /* dark navy: R=0 G=0 B=35% */
+            ocean_bg = 16;
+        }
+
         init_pair(CP_NATO,     COLOR_GREEN,  -1);
         init_pair(CP_PACT,     COLOR_RED,    -1);
-        init_pair(CP_HEADER,   COLOR_CYAN,   -1);
+        init_pair(CP_HEADER,   COLOR_CYAN,   ocean_bg);
         init_pair(CP_ALERT,    COLOR_RED,    -1);
         init_pair(CP_DIM,      COLOR_WHITE,  -1);
         init_pair(CP_CYAN,     COLOR_CYAN,   -1);
         init_pair(CP_MAGENTA,  COLOR_MAGENTA,-1);
         init_pair(CP_YELLOW,   COLOR_YELLOW, -1);
         init_pair(CP_WHITE,    COLOR_WHITE,  -1);
-        init_pair(CP_MAP_BG,   COLOR_BLUE,   -1);
-        init_pair(CP_MAP_NATO, COLOR_GREEN,  -1);
-        init_pair(CP_MAP_PACT, COLOR_RED,    -1);
-        init_pair(CP_MAP_DEAD, COLOR_RED,    -1);
-        init_pair(CP_MAP_PROJ, COLOR_YELLOW, -1);
-        init_pair(CP_MAP_AIR,  COLOR_CYAN,   -1);
+        init_pair(CP_MAP_BG,   COLOR_CYAN,   ocean_bg);  /* cyan grid on navy */
+        init_pair(CP_MAP_NATO, COLOR_GREEN,  ocean_bg);
+        init_pair(CP_MAP_PACT, COLOR_RED,    ocean_bg);
+        init_pair(CP_MAP_DEAD, COLOR_WHITE,  COLOR_RED);
+        init_pair(CP_MAP_PROJ, COLOR_YELLOW, ocean_bg);
+        init_pair(CP_MAP_AIR,  COLOR_CYAN,   ocean_bg);
         init_pair(CP_BORDER,   COLOR_CYAN,   -1);
+        /* New color pairs */
+        init_pair(CP_SPEED,      COLOR_YELLOW,  -1);
+        init_pair(CP_HELP_KEY,   COLOR_YELLOW,  ocean_bg);
+        init_pair(CP_HELP_DESC,  COLOR_WHITE,   ocean_bg);
+        init_pair(CP_HP_HIGH,    COLOR_GREEN,   -1);
+        init_pair(CP_HP_MED,     COLOR_YELLOW,  -1);
+        init_pair(CP_HP_LOW,     COLOR_RED,     -1);
+        init_pair(CP_TITLE_BAR,  COLOR_WHITE,   ocean_bg);
+        init_pair(CP_MODE_PLAY,  COLOR_GREEN,   ocean_bg);
+        init_pair(CP_MODE_PAUSE, COLOR_YELLOW,  ocean_bg);
     }
 
     /* Must refresh stdscr before creating panels (ncurses 6.5 requirement) */
@@ -2120,6 +2293,10 @@ static void tui_init(void) {
     win_pact   = newwin(bottom_h, bottom_w2, header_h + mid_h, bottom_w1);
     win_stats  = newwin(bottom_h, bottom_w3, header_h + mid_h, bottom_w1 + bottom_w2);
 
+    /* Set background colors */
+    wbkgd(win_header, COLOR_PAIR(CP_TITLE_BAR));
+    wbkgd(win_map, COLOR_PAIR(CP_MAP_BG));
+    keypad(win_map, TRUE); /* for arrow keys in subwindows */
 }
 
 static void tui_cleanup(void) {
@@ -2138,13 +2315,74 @@ static void draw_header(int tick) {
     mvwprintw(win_header, 0, 1,
               " NAVSIM v4.0 | Atlantic PoI 24.19N 43.37W | T+%02d:%02d | SS%d %s | Seed:%u",
               tick/60, tick%60, sea_state, beaufort_names[sea_state], g_seed);
+
+    /* Mode / speed indicator */
+    if (play_mode == MODE_PAUSED) {
+        wattron(win_header, COLOR_PAIR(CP_MODE_PAUSE) | A_BOLD);
+        wprintw(win_header, " [PAUSED %d/%d]", view_snap_idx + 1, snap_count);
+        wattroff(win_header, COLOR_PAIR(CP_MODE_PAUSE) | A_BOLD);
+    } else {
+        wattron(win_header, COLOR_PAIR(CP_MODE_PLAY) | A_BOLD);
+        wprintw(win_header, " [%s]", speed_labels[sim_speed]);
+        wattroff(win_header, COLOR_PAIR(CP_MODE_PLAY) | A_BOLD);
+    }
     wattroff(win_header, COLOR_PAIR(CP_HEADER) | A_BOLD);
 
-    /* Feature bar */
-    wattron(win_header, COLOR_PAIR(CP_DIM));
-    mvwprintw(win_header, 1, 1,
-              " Link-16/CEC | HARM/SEAD | A2A Combat | Helo ASW | Freq Hop | Comms Jam | Layered AD");
-    wattroff(win_header, COLOR_PAIR(CP_DIM));
+    /* Controls bar (replaces old feature bar) */
+    int col = 1;
+    wattron(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    mvwprintw(win_header, 1, col, " SPC");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wattron(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wprintw(win_header, ":Pause ");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_DESC));
+
+    wattron(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wprintw(win_header, "<");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wattron(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wprintw(win_header, "/");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wattron(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wprintw(win_header, ">");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wattron(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wprintw(win_header, ":Rew/Fwd ");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_DESC));
+
+    wattron(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wprintw(win_header, "[");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wattron(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wprintw(win_header, "/");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wattron(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wprintw(win_header, "]");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wattron(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wprintw(win_header, ":Step ");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_DESC));
+
+    wattron(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wprintw(win_header, "+/-");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wattron(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wprintw(win_header, ":Speed ");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_DESC));
+
+    wattron(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wprintw(win_header, "?");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wattron(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wprintw(win_header, ":Help ");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_DESC));
+
+    wattron(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wprintw(win_header, "Q");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    wattron(win_header, COLOR_PAIR(CP_HELP_DESC));
+    wprintw(win_header, ":Quit");
+    wattroff(win_header, COLOR_PAIR(CP_HELP_DESC));
 
     /* Horizontal separator */
     wattron(win_header, COLOR_PAIR(CP_BORDER));
@@ -2163,20 +2401,19 @@ static void draw_map(void) {
     mvwprintw(win_map, 0, 2, " TACTICAL PLOT %dx%d NM ", GRID_SIZE, GRID_SIZE);
     wattroff(win_map, COLOR_PAIR(CP_BORDER));
 
-    /* Draw grid dots */
-    wattron(win_map, COLOR_PAIR(CP_MAP_BG) | A_DIM);
+    /* Draw grid dots — background already set by wbkgd */
     for (int r = 1; r <= mh; r++) {
         for (int c = 1; c <= mw; c++) {
-            if (r % 4 == 0 && c % 8 == 0)
+            if (r % 4 == 0 && c % 8 == 0) {
+                wattron(win_map, COLOR_PAIR(CP_MAP_BG) | A_DIM);
                 mvwaddch(win_map, r, c, '+');
-            else
-                mvwaddch(win_map, r, c, ' ');
+                wattroff(win_map, COLOR_PAIR(CP_MAP_BG) | A_DIM);
+            }
         }
     }
-    wattroff(win_map, COLOR_PAIR(CP_MAP_BG) | A_DIM);
 
     /* Draw projectiles */
-    wattron(win_map, COLOR_PAIR(CP_MAP_PROJ));
+    wattron(win_map, COLOR_PAIR(CP_MAP_PROJ) | A_BOLD);
     for (int p = 0; p < num_projectiles; p++) {
         if (!projectiles[p].active) continue;
         int c = 1 + (int)(projectiles[p].x * mw / GRID_SIZE);
@@ -2185,7 +2422,7 @@ static void draw_map(void) {
         if (r < 1) r = 1; if (r > mh) r = mh;
         mvwaddch(win_map, r, c, projectiles[p].is_torpedo ? '~' : '*');
     }
-    wattroff(win_map, COLOR_PAIR(CP_MAP_PROJ));
+    wattroff(win_map, COLOR_PAIR(CP_MAP_PROJ) | A_BOLD);
 
     /* Draw aircraft sorties */
     for (int i = 0; i < num_ships; i++) {
@@ -2201,13 +2438,13 @@ static void draw_map(void) {
             int r = mh - (int)(sr->y * mh / GRID_SIZE);
             if (c < 1) c = 1; if (c > mw) c = mw;
             if (r < 1) r = 1; if (r > mh) r = mh;
-            wattron(win_map, COLOR_PAIR(CP_MAP_AIR));
+            wattron(win_map, COLOR_PAIR(CP_MAP_AIR) | A_BOLD);
             char ac = '^';
             if (sr->type == SORTIE_STRIKE) ac = '!';
             else if (sr->type == SORTIE_ASW) ac = 'w';
             else if (sr->type == SORTIE_AEW) ac = 'E';
             mvwaddch(win_map, r, c, ac);
-            wattroff(win_map, COLOR_PAIR(CP_MAP_AIR));
+            wattroff(win_map, COLOR_PAIR(CP_MAP_AIR) | A_BOLD);
         }
 
         /* Helo sorties */
@@ -2218,9 +2455,9 @@ static void draw_map(void) {
             int r = mh - (int)(h->y * mh / GRID_SIZE);
             if (c < 1) c = 1; if (c > mw) c = mw;
             if (r < 1) r = 1; if (r > mh) r = mh;
-            wattron(win_map, COLOR_PAIR(cpair));
+            wattron(win_map, COLOR_PAIR(cpair) | A_BOLD);
             mvwaddch(win_map, r, c, 'h');
-            wattroff(win_map, COLOR_PAIR(cpair));
+            wattroff(win_map, COLOR_PAIR(cpair) | A_BOLD);
         }
     }
 
@@ -2233,9 +2470,9 @@ static void draw_map(void) {
         if (r < 1) r = 1; if (r > mh) r = mh;
 
         if (!s->alive) {
-            wattron(win_map, COLOR_PAIR(CP_MAP_DEAD) | A_DIM);
+            wattron(win_map, COLOR_PAIR(CP_MAP_DEAD) | A_BOLD);
             mvwaddch(win_map, r, c, 'X');
-            wattroff(win_map, COLOR_PAIR(CP_MAP_DEAD) | A_DIM);
+            wattroff(win_map, COLOR_PAIR(CP_MAP_DEAD) | A_BOLD);
         } else {
             int cpair = (s->side == SIDE_NATO) ? CP_MAP_NATO : CP_MAP_PACT;
             int attr = A_BOLD;
@@ -2408,6 +2645,57 @@ static void draw_stats(int tick) {
     }
 }
 
+static void draw_help_overlay(void) {
+    int ow = 52, oh = 20;
+    int oy = (tui_rows - oh) / 2;
+    int ox = (tui_cols - ow) / 2;
+    if (oy < 0) oy = 0;
+    if (ox < 0) ox = 0;
+
+    WINDOW *hw = newwin(oh, ow, oy, ox);
+    wbkgd(hw, COLOR_PAIR(CP_HELP_DESC));
+    werase(hw);
+    box(hw, 0, 0);
+
+    wattron(hw, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+    mvwprintw(hw, 0, 2, " NAVSIM CONTROLS ");
+    wattroff(hw, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+
+    int r = 2;
+    struct { const char *key; const char *desc; } keys[] = {
+        {"SPACE",    "Pause / Resume simulation"},
+        {"[ or ,",   "Step / scrub backward (while paused)"},
+        {"] or .",   "Step / scrub forward (while paused)"},
+        {"< (Shift+,)", "Jump back 10 frames (while paused)"},
+        {"> (Shift+.)", "Jump forward 10 frames (while paused)"},
+        {"+/=",      "Increase simulation speed"},
+        {"-",        "Decrease simulation speed"},
+        {"R",        "Resume from current frame (rewind+play)"},
+        {"?",        "Toggle this help overlay"},
+        {"Q",        "Quit simulation"},
+        {NULL, NULL}
+    };
+
+    for (int i = 0; keys[i].key; i++) {
+        wattron(hw, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+        mvwprintw(hw, r, 2, " %14s ", keys[i].key);
+        wattroff(hw, COLOR_PAIR(CP_HELP_KEY) | A_BOLD);
+        wattron(hw, COLOR_PAIR(CP_HELP_DESC));
+        wprintw(hw, " %s", keys[i].desc);
+        wattroff(hw, COLOR_PAIR(CP_HELP_DESC));
+        r++;
+    }
+
+    r += 1;
+    wattron(hw, COLOR_PAIR(CP_DIM));
+    mvwprintw(hw, r++, 2, "Speed levels: 0.25x 0.5x 1x 2x 4x MAX");
+    mvwprintw(hw, r++, 2, "Press ? or any key to close this overlay");
+    wattroff(hw, COLOR_PAIR(CP_DIM));
+
+    wrefresh(hw);
+    delwin(hw);
+}
+
 static void tui_draw(int tick) {
     draw_header(tick);
     draw_map();
@@ -2426,6 +2714,7 @@ static void tui_draw(int tick) {
     wnoutrefresh(win_pact);
     wnoutrefresh(win_stats);
     doupdate();
+    if (show_help) draw_help_overlay();
 }
 
 /* ── Write CSV ───────────────────────────────────────────── */
@@ -2573,61 +2862,187 @@ int main(int argc, char **argv) {
     evt_log(0, CP_PACT, "PACT: %d platforms loaded", pact_count);
     evt_log(0, CP_WHITE, "--- ENGAGEMENT BEGINS ---");
 
-    /* Draw initial state */
+    /* Allocate snapshot buffer */
+    snapshots = (Snapshot *)malloc(sizeof(Snapshot) * MAX_SNAPSHOTS);
+    if (!snapshots) {
+        endwin();
+        fprintf(stderr, "[FATAL] Could not allocate snapshot buffer.\n");
+        return 1;
+    }
+    snap_count = 0;
+
+    /* Draw initial state and save tick-0 snapshot */
     tui_draw(0);
+    snap_save(0);
 
     int battle_over = 0;
-    for (int tick = 1; tick <= MAX_TICK && !battle_over; tick++) {
-        phase_weather(tick);
-        phase_detect(tick);
-        phase_sonar(tick);
-        phase_c4isr(tick);
-        phase_move(tick);
-        phase_weapons(tick);
-        phase_air_to_air(tick);
-        phase_helicopters(tick);
-        phase_aviation(tick);
-        phase_damage_consequences(tick);
+    int sim_finished = 0;
+    int current_tick = 0;
+    play_mode = MODE_PLAY;
+    view_snap_idx = 0;
 
-        /* Redraw TUI every 2 seconds of sim time (or every tick if you want smooth) */
-        if (tick % 2 == 0) {
-            tui_draw(tick);
+    while (!battle_over) {
+        /* --- Input handling (always) --- */
+        int ch = getch();
 
-            /* Check for 'q' to quit early */
-            int ch = getch();
-            if (ch == 'q' || ch == 'Q') {
-                battle_over = 1;
-                evt_log(tick, CP_ALERT, "--- SIMULATION ABORTED BY USER ---");
-            }
-            /* Space to pause */
-            if (ch == ' ') {
-                nodelay(stdscr, FALSE);
-                mvwprintw(win_header, 1, tui_cols - 12, " [PAUSED] ");
-                wrefresh(win_header);
-                getch(); /* wait for any key */
-                nodelay(stdscr, TRUE);
-            }
+        if (ch == 'q' || ch == 'Q') {
+            if (!sim_finished)
+                evt_log(current_tick, CP_ALERT, "--- SIMULATION ABORTED BY USER ---");
+            battle_over = 1;
+            continue;
         }
 
-        int nu=0, pu=0;
-        for (int i=0;i<num_ships;i++){
-            if(!ships[i].alive) continue;
-            if(ships[i].side==SIDE_NATO) nu++;
-            else pu++;
+        switch (ch) {
+            case ' ':
+                if (play_mode == MODE_PLAY) {
+                    play_mode = MODE_PAUSED;
+                    view_snap_idx = snap_count - 1;
+                } else {
+                    /* Resume: restore state from current view and continue sim */
+                    if (!sim_finished) {
+                        snap_restore(view_snap_idx);
+                        current_tick = snapshots[view_snap_idx].tick;
+                        /* Discard snapshots after this point (branching timeline) */
+                        snap_count = view_snap_idx + 1;
+                        play_mode = MODE_PLAY;
+                    }
+                }
+                break;
+
+            case 'r': case 'R':
+                /* Resume from current viewed frame */
+                if (play_mode == MODE_PAUSED && !sim_finished) {
+                    snap_restore(view_snap_idx);
+                    current_tick = snapshots[view_snap_idx].tick;
+                    snap_count = view_snap_idx + 1;
+                    play_mode = MODE_PLAY;
+                }
+                break;
+
+            case '[': case ',':
+                /* Step/scrub backward */
+                play_mode = MODE_PAUSED;
+                if (view_snap_idx > 0) view_snap_idx--;
+                snap_restore(view_snap_idx);
+                tui_draw(snapshots[view_snap_idx].tick);
+                break;
+
+            case ']': case '.':
+                /* Step/scrub forward */
+                play_mode = MODE_PAUSED;
+                if (view_snap_idx < snap_count - 1) view_snap_idx++;
+                snap_restore(view_snap_idx);
+                tui_draw(snapshots[view_snap_idx].tick);
+                break;
+
+            case '<':
+                /* Jump back 10 frames */
+                play_mode = MODE_PAUSED;
+                view_snap_idx -= 10;
+                if (view_snap_idx < 0) view_snap_idx = 0;
+                snap_restore(view_snap_idx);
+                tui_draw(snapshots[view_snap_idx].tick);
+                break;
+
+            case '>':
+                /* Jump forward 10 frames */
+                play_mode = MODE_PAUSED;
+                view_snap_idx += 10;
+                if (view_snap_idx >= snap_count) view_snap_idx = snap_count - 1;
+                snap_restore(view_snap_idx);
+                tui_draw(snapshots[view_snap_idx].tick);
+                break;
+
+            case '+': case '=':
+                if (sim_speed < NUM_SPEEDS - 1) sim_speed++;
+                break;
+
+            case '-': case '_':
+                if (sim_speed > 0) sim_speed--;
+                break;
+
+            case '?': case 'h':
+                show_help = !show_help;
+                if (play_mode == MODE_PAUSED) {
+                    snap_restore(view_snap_idx);
+                    tui_draw(snapshots[view_snap_idx].tick);
+                }
+                break;
+
+            default:
+                break;
         }
-        if (nu==0 || pu==0) battle_over=1;
+
+        /* --- Simulation tick (only in PLAY mode) --- */
+        if (play_mode == MODE_PLAY && !sim_finished) {
+            current_tick++;
+            if (current_tick > MAX_TICK) {
+                sim_finished = 1;
+                evt_log(MAX_TICK, CP_HEADER, "--- ENGAGEMENT COMPLETE ---");
+                play_mode = MODE_PAUSED;
+                view_snap_idx = snap_count - 1;
+                tui_draw(MAX_TICK);
+                continue;
+            }
+
+            phase_weather(current_tick);
+            phase_detect(current_tick);
+            phase_sonar(current_tick);
+            phase_c4isr(current_tick);
+            phase_move(current_tick);
+            phase_weapons(current_tick);
+            phase_air_to_air(current_tick);
+            phase_helicopters(current_tick);
+            phase_aviation(current_tick);
+            phase_damage_consequences(current_tick);
+
+            /* Save snapshot every tick */
+            snap_save(current_tick);
+            view_snap_idx = snap_count - 1;
+
+            /* Check victory */
+            int nu = 0, pu = 0;
+            for (int i = 0; i < num_ships; i++) {
+                if (!ships[i].alive) continue;
+                if (ships[i].side == SIDE_NATO) nu++;
+                else pu++;
+            }
+            if (nu == 0 || pu == 0) {
+                sim_finished = 1;
+                evt_log(current_tick, CP_HEADER, "--- ENGAGEMENT COMPLETE ---");
+                play_mode = MODE_PAUSED;
+                view_snap_idx = snap_count - 1;
+            }
+
+            /* Draw at configured interval */
+            if (current_tick % 2 == 0) {
+                tui_draw(current_tick);
+                if (speed_delays[sim_speed] > 0)
+                    napms(speed_delays[sim_speed]);
+            }
+        } else if (play_mode == MODE_PAUSED) {
+            /* In pause mode, just idle briefly to avoid CPU spin */
+            napms(30);
+        }
     }
 
     /* Final draw */
-    tui_draw(MAX_TICK);
-    evt_log(MAX_TICK, CP_HEADER, "--- ENGAGEMENT COMPLETE ---");
-    tui_draw(MAX_TICK);
+    if (snap_count > 0) {
+        snap_restore(snap_count - 1);
+        tui_draw(snapshots[snap_count - 1].tick);
+    }
 
     /* Wait for keypress before exiting ncurses */
     nodelay(stdscr, FALSE);
-    mvwprintw(win_header, 1, 1, " Press any key for after-action report...");
+    play_mode = MODE_PAUSED;
+    view_snap_idx = snap_count - 1;
+    mvwprintw(win_header, 1, 1, " Press any key for after-action report...                                    ");
     wrefresh(win_header);
     getch();
+
+    /* Free snapshot buffer */
+    free(snapshots);
+    snapshots = NULL;
 
     /* Cleanup TUI */
     tui_cleanup();
